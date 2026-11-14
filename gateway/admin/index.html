@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账号池 · 豆包工作</title>
+  <link rel="icon" href="/avatar.png">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <img class="brand-logo" src="/avatar.png" alt="豆包工作" width="38" height="38">
+        <div class="brand-copy">
+          <strong class="brand-title">豆包工作</strong>
+          <span class="brand-subtitle">账号池管理台</span>
+        </div>
+      </div>
+
+      <nav class="nav" id="navigation" aria-label="功能导航">
+        <button class="nav-item active" type="button" data-view="accounts" aria-current="page">
+          <span class="nav-icon" data-icon="users"></span>
+          <span class="nav-label">账号池</span>
+        </button>
+        <button class="nav-item" type="button" data-view="models">
+          <span class="nav-icon" data-icon="layers"></span>
+          <span class="nav-label">模型目录</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings">
+          <span class="nav-icon" data-icon="settings"></span>
+          <span class="nav-label">接入配置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="gateway-card">
+          <div class="gateway-status" id="gateway-state">
+            <span class="status-dot neutral"></span>
+            正在连接网关…
+          </div>
+          <div class="gateway-address">
+            <span class="address-label">本机管理地址</span>
+            <code class="mono" id="local-address">127.0.0.1</code>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div class="breadcrumb-wrap">
+            <span class="breadcrumb-root">控制台</span>
+            <span class="breadcrumb-sep" aria-hidden="true">/</span>
+            <span class="breadcrumb-current" id="breadcrumb">账号池</span>
+          </div>
+          <div class="topbar-meta">
+            <span class="local-badge">
+              <span class="status-dot success"></span>
+              仅本机安全访问
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main class="main-container" id="content" tabindex="-1">
+        <div class="initial-loading">正在加载管理台…</div>
+      </main>
+    </div>
+  </div>
+
+  <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
