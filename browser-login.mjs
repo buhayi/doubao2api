@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
 import { once } from "node:events";
+import { createCaptchaBrowser } from "./captcha-browser.mjs";
+import { createCaptchaController } from "./captcha.mjs";
 import { win32 as winPath } from "node:path";
 import {
   envValue,
@@ -57,6 +59,7 @@ export function sessionIdentity(raw) {
 const ACTIVE = new Set([
   "starting",
   "waiting",
+  "verifying",
   "awaiting_confirmation",
   "importing",
 ]);
@@ -423,6 +426,39 @@ export async function launchIsolatedBrowser(
     return attachment.sessionId;
   }
   return {
+    captcha: createCaptchaBrowser({
+      async send(method, params) {
+        const sessionId = await pageSession();
+        if (!sessionId && method === "Runtime.evaluate") return { result: { value: null } };
+        if (!sessionId) throw Error("豆包验证页面尚未打开。");
+        return client.send(method, params, sessionId);
+      },
+    }),
+    async restore(secret) {
+      if (typeof secret?.cookieHeader !== "string" || secret.cookieHeader.length > 65536 || /[\r\n]/.test(secret.cookieHeader))
+        throw Error("账号会话格式不正确。");
+      const { targetInfos = [] } = await client.send("Target.getTargets");
+      const page = targetInfos.find((p) => p.type === "page" && (p.url === "about:blank" || isDoubaoPage(p.url)));
+      if (!page) throw Error("专用浏览器页面未就绪。");
+      const { sessionId } = await client.send("Target.attachToTarget", { targetId: page.targetId, flatten: true });
+      attachment = { targetId: page.targetId, sessionId };
+      const cookies = secret.cookieHeader.split(";").map((part) => {
+        const at = part.indexOf("=");
+        return { name: part.slice(0, at).trim(), value: part.slice(at+1).trim(), domain: ".doubao.com", path: "/", secure: true };
+      });
+      if (!cookies.some((cookie) => ["sessionid", "sessionid_ss"].includes(cookie.name) && cookie.value)) throw Error("账号缺少登录会话。");
+      await client.send("Network.setCookies", { cookies }, sessionId);
+      const identity = sessionIdentity(secret);
+      if (identity.userAgent) await client.send("Network.setUserAgentOverride", { userAgent: identity.userAgent }, sessionId);
+      const records = {
+        ...(identity.webId ? { samantha_web_web_id: { web_id: identity.webId } } : {}),
+        ...(identity.deviceId ? { client_device_info: { deviceId: identity.deviceId,
+          ...Object.fromEntries(Object.entries(identity).filter(([key]) => !["deviceId", "webId"].includes(key))),
+          ...(identity.channel ? { appChannel: identity.channel } : {}) } } : {}),
+      };
+      await client.send("Page.addScriptToEvaluateOnNewDocument", { source: `(function(){if(location.protocol!=="https:"||!["doubao.com","www.doubao.com"].includes(location.hostname))return;var records=${JSON.stringify(records)};for(var key in records){try{var old=JSON.parse(localStorage.getItem(key)||"{}");localStorage.setItem(key,JSON.stringify(Object.assign({},old,records[key])))}catch(e){}}})()` }, sessionId);
+      await client.send("Page.navigate", { url: LOGIN_URL }, sessionId);
+    },
     async cookies() {
       const sessionId = await pageSession();
       if (!sessionId) return [];
@@ -462,6 +498,7 @@ export class BrowserLogin {
     ttlMs = 10 * 60_000,
     platform = process.platform,
     now = Date.now,
+    captchaManualFallback = true,
   }) {
     this.tmpRoot = tmpRoot;
     this.importAccount = importAccount;
@@ -472,6 +509,8 @@ export class BrowserLogin {
     this.ttlMs = ttlMs;
     this.platform = platform;
     this.now = now;
+    this.captchaManualFallback = captchaManualFallback;
+    this.captcha = createCaptchaController();
     this.current = null;
     this.disposed = false;
     this.state = {
@@ -522,7 +561,9 @@ export class BrowserLogin {
       busy: false,
       stable: "",
       ready: null,
+      controller: new AbortController(),
     };
+    this.captcha = createCaptchaController();
     this.current = session;
     const startedAt = this.now();
     this.state = {
@@ -627,6 +668,7 @@ export class BrowserLogin {
     session.busy = true;
     try {
       if (this.now() >= this.state.expiresAt) {
+        session.controller.abort();
         this.update(
           session,
           "expired",
@@ -634,6 +676,28 @@ export class BrowserLogin {
         );
         await this.finish(session);
         return;
+      }
+      if (this.captchaManualFallback && session.handle.captcha?.describe) {
+        const signal = session.context.signal ? AbortSignal.any([session.context.signal, session.controller.signal]) : session.controller.signal;
+        const present = Boolean(await session.handle.captcha.describe());
+        signal.throwIfAborted();
+        if (this.current !== session || session.cancelled) return;
+        if (present || this.captcha.status().state === "manual") {
+          if ((await session.handle.captcha?.outcome?.())?.closed) {
+            this.update(session, "cancelled", "官网验证已关闭，本次登录已取消。");
+            await this.finish(session);
+            return;
+          }
+          await this.captcha.requestManual(session.handle, { signal,
+            onStatus: (captcha) => this.update(session, "waiting", captcha.message, { captcha }),
+          });
+          const result = await this.captcha.inspect(session.handle, { signal,
+            onStatus: (captcha) => this.update(session, "waiting", captcha.message, { captcha }),
+          });
+          if (this.current !== session || session.cancelled) return;
+          if (result.present) { this.schedule(session); return; }
+          this.captcha = createCaptchaController();
+        }
       }
       const cookies = doubaoCookies(await session.handle.cookies());
       if (this.current !== session || session.cancelled) return;
@@ -732,6 +796,7 @@ export class BrowserLogin {
       );
       await this.finish(session);
     } catch {
+      if (session.cancelled || this.current !== session) return;
       this.update(
         session,
         "error",
@@ -796,6 +861,7 @@ export class BrowserLogin {
     if (this.state.state === "importing" && !shutdown)
       throw failure(409, "账号正在核验，请等待本次结果后再关闭。");
     session.cancelled = true;
+    session.controller.abort();
     clearTimeout(session.timer);
     this.update(
       session,

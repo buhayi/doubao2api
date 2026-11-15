@@ -74,3 +74,45 @@ test("思考与正文分开；修订已输出文本时停止，不拼接伪造�
   }, /修订/);
   assert.deepEqual(got, [{ reasoning_content: "思考" }, { content: "答复" }]);
 });
+
+const patch = (rows, object = 1) => event("STREAM_CHUNK", {
+  message_id: "assistant",
+  patch_op: [{ patch_object: object, patch_type: 1, patch_value: { content_block: rows } }],
+});
+test("紧凑增量延续当前文本块，完整快照不重复已输出正文", async () => {
+  const raw = patch([block("你好")])
+    + patch([], 111)
+    + event("CHUNK_DELTA", { text: "世界" })
+    + event("FULL_MSG_NOTIFY", { message: { user_type: 2, content_block: [block("你好世界")] } })
+    + event("SSE_REPLY_END", {});
+  const values = [];
+  for await (const delta of decodeEvents(response(raw))) values.push(delta);
+  assert.deepEqual(values, [{ content: "你好" }, { content: "世界" }]);
+});
+test("紧凑增量继承思考元数据，切换正文块后分别去重", async () => {
+  const reasoningHeader = {
+    ...block(""), block_id: "reasoning",
+    content: { text_block: { icon_url: "deep_think" } },
+  };
+  const raw = patch([reasoningHeader])
+    + event("CHUNK_DELTA", { text: "推理" })
+    + patch([block("答")])
+    + event("CHUNK_DELTA", { text: "复" })
+    + event("FULL_MSG_NOTIFY", { message: { user_type: 2, content_block: [
+      { ...reasoningHeader, content: { text_block: { text: "推理", icon_url: "deep_think" } } },
+      block("答复"),
+    ] } })
+    + event("SSE_REPLY_END", {});
+  const values = [];
+  for await (const delta of decodeEvents(response(raw))) values.push(delta);
+  assert.deepEqual(values, [{ reasoning_content: "推理" }, { content: "答" }, { content: "复" }]);
+});
+test("任务状态块的紧凑增量不冒充回答正文", async () => {
+  const raw = patch([{ block_id: "status", block_type: 10040, content: { thinking_block: {} } }])
+    + event("CHUNK_DELTA", { text: "任务状态" })
+    + patch([block("真正答复")])
+    + event("SSE_REPLY_END", {});
+  const values = [];
+  for await (const delta of decodeEvents(response(raw))) values.push(delta);
+  assert.deepEqual(values, [{ content: "真正答复" }]);
+});

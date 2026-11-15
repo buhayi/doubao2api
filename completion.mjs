@@ -73,6 +73,12 @@ export function buildRequest(bot, model, body, { promptTools = true } = {}) {
   const bridge = {
     marker,
     active: names.size > 0,
+    canStreamText(text) {
+      const prefix = text.trimStart();
+      // JSON and code fences may contain tool calls; keep them until validation.
+      return !forced && prefix.length > 0 && !["{", "["].includes(prefix[0]) &&
+        !"```".startsWith(prefix) && !prefix.startsWith("```") && !text.includes(marker);
+    },
     message(text) {
       const trimmed = text
         .trim()
@@ -253,9 +259,10 @@ export async function createCompletion(
   api,
   secret,
   body,
-  { signal, promptTools = true, idleMs, cleanupConversation } = {},
+  { signal, promptTools = true, idleMs, cleanupConversation, onVerification } = {},
 ) {
-  const catalog = await api.catalog(secret, { signal }),
+  const verificationOptions = typeof onVerification === "function" ? { onVerification } : {};
+  const catalog = await api.catalog(secret, { signal, ...verificationOptions }),
     model = catalog.models[body.model];
   if (!model)
     throw fail(404, "该账号当前模型目录没有这个模型，请刷新目录后重选。");
@@ -281,13 +288,30 @@ export async function createCompletion(
     console.warn("上游会话隐藏未完成，请检查历史列表和网关连接。");
     return "failed";
   }) : undefined;
-  const response = await api.post(secret, "/chat/completion", payload, {
-      signal: combined,
-      stream: true,
-    }),
-    iterator = decodeEvents(response, { signal: combined, idleMs, onConversation: cleanupConversation ? observe : undefined, onClose: cleanup })[
-      Symbol.asyncIterator
-    ]();
+  async function* events() {
+    let current = secret, recovered = false, emitted = false;
+    try {
+      for (;;) {
+        let response;
+        try {
+          response = await api.post(current, "/chat/completion", payload, { signal: combined, stream: true, ...verificationOptions });
+          for await (const delta of decodeEvents(response, { signal: combined, idleMs, onConversation: observe })) {
+            emitted = true;
+            yield delta;
+          }
+          return;
+        } catch (error) {
+          // Only an explicit rejection before a conversation acknowledgement
+          // or any output can be replayed, with the same payload and account.
+          if (error.reason !== "verification_required" || recovered || emitted || acknowledged || conversation.conversationId ||
+              error.automaticVerificationAttempted || !api.recover || (response && api.canRecover?.(response) === false)) throw error;
+          current = await api.recover(current, error, { signal: combined, ...verificationOptions });
+          recovered = true;
+        }
+      }
+    } finally { await cleanup?.(); }
+  }
+  const iterator = events()[Symbol.asyncIterator]();
   const id = "chatcmpl_" + randomUUID().replaceAll("-", ""),
     created = Math.floor(Date.now() / 1000),
     base = { id, created, model: body.model };
@@ -299,7 +323,7 @@ export async function createCompletion(
       choices: [{ index: 0, delta, finish_reason }],
     }) +
     "\n\n";
-  if (body.stream === false || bridge.active) {
+  if (body.stream === false) {
     let text = "",
       reasoning = "";
     for (;;) {
@@ -314,37 +338,55 @@ export async function createCompletion(
       : { role: "assistant", content: text };
     if (reasoning) message.reasoning_content = reasoning;
     const reason = message.tool_calls ? "tool_calls" : "stop";
-    if (body.stream === false)
-      return jsonResponse({
-        ...base,
-        object: "chat.completion",
-        choices: [{ index: 0, message, finish_reason: reason }],
-      });
-    const delta = { ...message };
-    if (delta.tool_calls)
-      delta.tool_calls = delta.tool_calls.map((c, index) => ({ ...c, index }));
-    return new Response(chunk(delta) + chunk({}, reason) + "data: [DONE]\n\n", {
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-store",
-      },
+    return jsonResponse({
+      ...base,
+      object: "chat.completion",
+      choices: [{ index: 0, message, finish_reason: reason }],
     });
   }
-  const first = await iterator.next();
+  let finishReason = "stop";
+  async function* streamDeltas() {
+    let text = "", streamingText = !bridge.active, hasText = false;
+    for await (const value of iterator) {
+      if (value.content) hasText = true;
+      if (!bridge.active) { yield value; continue; }
+      const delta = { ...value };
+      delete delta.content;
+      if (value.content) {
+        text += value.content;
+        if (streamingText) {
+          if (text.includes(bridge.marker)) bridge.message(text);
+          delta.content = value.content;
+        } else if (bridge.canStreamText(text)) {
+          streamingText = true;
+          delta.content = text;
+        }
+      }
+      if (Object.keys(delta).length) yield delta;
+    }
+    if (!hasText) throw fail(502, "豆包工作没有返回回答正文。");
+    if (bridge.active) {
+      const message = bridge.message(text);
+      if (message.tool_calls) {
+        finishReason = "tool_calls";
+        yield { content: null, tool_calls: message.tool_calls.map((call, index) => ({ ...call, index })) };
+      } else if (!streamingText) yield { content: message.content };
+    }
+  }
+  const output = streamDeltas()[Symbol.asyncIterator]();
+  const first = await output.next();
   if (first.done) throw fail(502, "豆包工作没有返回文本回答。");
   let initial = first,
-    started = false,
-    hasText = false;
+    started = false;
   return new Response(
     new ReadableStream({
       async pull(c) {
         try {
-          const next = initial || (await iterator.next());
+          const next = initial || (await output.next());
           initial = null;
           if (next.done) {
-            if (!hasText) throw fail(502, "豆包工作没有返回回答正文。");
             c.enqueue(
-              new TextEncoder().encode(chunk({}, "stop") + "data: [DONE]\n\n"),
+              new TextEncoder().encode(chunk({}, finishReason) + "data: [DONE]\n\n"),
             );
             c.close();
             return;
@@ -354,7 +396,6 @@ export async function createCompletion(
             delta.role = "assistant";
             started = true;
           }
-          if (delta.content) hasText = true;
           c.enqueue(new TextEncoder().encode(chunk(delta)));
         } catch (e) {
           controller.abort();
@@ -363,7 +404,7 @@ export async function createCompletion(
       },
       async cancel() {
         controller.abort();
-        await iterator.return?.();
+        await output.return?.();
       },
     }),
     {

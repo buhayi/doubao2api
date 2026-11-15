@@ -23,14 +23,21 @@ class FakeBrowser {
   }
 }
 test("独立登录门户不回显 Cookie，取消与来源校验可靠，双开被明确提示", async () => {
+  class CaptchaBrowser extends FakeBrowser {
+    async start() {
+      await super.start();
+      this.state.captcha = { state: "manual", attempts: 1, message: "请在独立窗口完成人工验证" };
+    }
+  }
   const dir = await mkdtemp(join(tmpdir(), "dw-login-"));
   const manager = createLoginManager({
     root: dir,
     api: {},
-    Browser: FakeBrowser,
+    Browser: CaptchaBrowser,
   });
   try {
     const flow = await manager.start();
+    assert.equal(flow.status().captcha.state, "manual");
     assert(new URL(flow.url).hostname === "127.0.0.1");
     const html = await fetch(flow.url);
     assert.equal(html.status, 200);
@@ -43,6 +50,7 @@ test("独立登录门户不回显 Cookie，取消与来源校验可靠，双开�
       await fetch(flow.url + "status", { headers: { "X-Doubao-Login": "1" } })
     ).json();
     assert.equal(status.state, "waiting");
+    assert.equal(status.captcha.state, "manual");
     assert.equal(status.access, undefined);
     assert.equal(
       (

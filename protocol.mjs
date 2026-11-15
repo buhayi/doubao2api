@@ -156,6 +156,9 @@ export function endpoint(secret, path) {
     if (v) q.set(k, v);
   return ORIGIN + path + "?" + q.toString();
 }
+const verificationDetails = new WeakMap();
+// Challenge data is internal, never an enumerable error field or API response.
+export const verificationDecision = (error) => verificationDetails.get(error);
 export function vendorError(status, value = {}) {
   const detail = plain(value?.error_detail)
     ? value.error_detail
@@ -189,16 +192,22 @@ export function vendorError(status, value = {}) {
     Number.isSafeInteger(code) && code > 0 ? "（上游代码 " + code + "）" : "";
   // The business code is only an envelope. Never label it CAPTCHA unless
   // the upstream explicitly says so; never echo its challenge or raw text.
-  if (plain(decision) && decision.type === "verify")
-    return withCode(
+  if (plain(decision) && decision.type === "verify") {
+    const error = withCode(
       fail(
         429,
-        "豆包上游明确要求人工验证" +
+        "豆包上游要求图片验证" +
           suffix +
-          "。请重新登录本插件，在独立窗口手动完成官网验证后点击“接入 Magpie”；官方客户端可用不代表该独立会话已通过验证。",
+          "。请按独立窗口中的官网提示完成验证；本次请求未恢复时，可在管理台重新登录并完成验证后重试。",
       ),
       "verification_required",
     );
+    try {
+      const encoded = JSON.stringify(decision);
+      if (encoded.length <= 65536) verificationDetails.set(error, JSON.parse(encoded));
+    } catch { /* A malformed challenge keeps the normal verification error. */ }
+    return error;
+  }
   if (
     status === 401 ||
     code === 710012001 ||
@@ -618,7 +627,7 @@ export function createApi({ fetchImpl = fetch } = {}) {
           { signal },
         );
       } catch (e) {
-        if (e.signIn) throw e;
+        if (e.signIn || e.reason === "verification_required") throw e;
       }
       return { ...quotaView(overview, entry), user: s.name || s.userId };
     },

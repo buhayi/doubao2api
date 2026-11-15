@@ -11,7 +11,6 @@ import { createStore } from "../gateway/store.mjs";
 import { runCli } from "../gateway/cli.mjs";
 import { saveAuth } from "../protocol.mjs";
 import { createLoginManager } from "../login.mjs";
-import { createCheckin } from "../checkin.mjs";
 
 async function directory(t) {
   const root = await mkdtemp(join(tmpdir(), "dw-gateway-test-"));
@@ -35,6 +34,9 @@ test("配置：零配置默认值、.env 与环境优先级、IPv6 地址", asyn
   assert.equal(defaults.promptTools, true);
   assert.equal(defaults.hideHistory, true);
   assert.equal(defaults.maxConcurrency, 3);
+  assert.equal(defaults.autoCaptcha, false);
+  assert.equal(defaults.captchaManualFallback, true);
+  assert.equal(defaults.captchaManualTimeoutMs, 300000);
   await writeFile(join(cwd, ".env"), 'DW_PORT=9000\nDW_API_KEY="sk-env-fixture-123456"\nDW_DATA_DIR=private\nDW_CORS_ORIGINS=https://chat.example.test,http://localhost:3000\nDW_PROMPT_TOOLS=false\nDW_MAX_CONCURRENCY=2\n');
   assert.equal((await loadConfig({ cwd, env: {} })).maxConcurrency, 2);
   const config = await loadConfig({ cwd, env: { DW_PORT: "9001", DW_MAX_CONCURRENCY: "4", DW_HIDE_HISTORY: "false" } });
@@ -47,6 +49,12 @@ test("配置：零配置默认值、.env 与环境优先级、IPv6 地址", asyn
   assert.deepEqual(config.corsOrigins, ["https://chat.example.test", "http://localhost:3000"]);
   assert.equal(baseUrl("0.0.0.0", 8787), "http://127.0.0.1:8787/v1");
   assert.equal(baseUrl("::1", 8787), "http://[::1]:8787/v1");
+  const manual = await loadConfig({ cwd, env: { DW_AUTO_CAPTCHA: "false", DW_CAPTCHA_MANUAL_FALLBACK: "true", DW_CAPTCHA_MANUAL_TIMEOUT_MS: "120000" } });
+  assert.equal(manual.autoCaptcha, false);
+  assert.equal(manual.captchaManualFallback, true);
+  assert.equal(manual.captchaManualTimeoutMs, 120000);
+  assert.equal((await loadConfig({ cwd, env: { DW_AUTO_CAPTCHA: "true" } })).autoCaptcha, false);
+  assert.equal((await loadConfig({ cwd, env: { DW_CAPTCHA_MANUAL_FALLBACK: "false" } })).captchaManualFallback, false);
 });
 
 test("配置：自定义密钥不要求长度或前缀，支持符号和内部空格", async (t) => {
@@ -69,6 +77,7 @@ test("配置：拒绝无法通过请求头传输的密钥、异常端口、超�
     { DW_HOST: "http://127.0.0.1:8787" }, { DW_TIMEOUT_MS: "1" }, { DW_MAX_CONCURRENCY: "0" },
     { DW_CORS_ORIGINS: "https://site.test/path" }, { DW_CORS_ORIGINS: "null" }, { DW_CORS_ORIGINS: "https://site.test/" },
     { DW_PROMPT_TOOLS: "yes" }, { DW_HIDE_HISTORY: "yes" }, { DW_HIDE_HISTORY: "1" }, { DW_DATA_DIR: "." }, { DW_DATA_DIR: ".." }, { DW_DATA_DIR: resolve(cwd, "../../") },
+    { DW_CAPTCHA_MANUAL_FALLBACK: "yes" }, { DW_CAPTCHA_MANUAL_TIMEOUT_MS: "9999" }, { DW_CAPTCHA_MANUAL_TIMEOUT_MS: "600001" },
   ]) await assert.rejects(loadConfig({ cwd, env }));
   for (const key of [undefined, null, 123, "", " ", " key", "key ", "中文", "key\n", "key\r", "key\t", "key\0", "key\x7f"])
     assert.throws(() => validateApiKey(key), /DW_API_KEY/);
@@ -101,18 +110,16 @@ test("存储：已有的短密钥保持不变，不因格式变化重新生成",
   assert.equal(await readFile(file, "utf8"), content);
 });
 
-test("存储：签到记录目录兼容服务重启，保留已有账号和记录", async (t) => {
+test("存储：移除签到后兼容旧记录目录，保留已有账号和记录", async (t) => {
   const root = await directory(t);
   const store = makeStore(root);
   await store.save(auth("a"));
   const accounts = await readFile(join(root, "accounts.json"), "utf8");
   const checkins = join(root, "checkins");
-  const engine = createCheckin({ root: checkins, api: { post: async (_secret, path) => path.endsWith("/launch")
-    ? { data: { ug_campaign_info: { campaign_group_code: "pc_incentive_task_mvp_v3" } } }
-    : { data: { tasks: [{ campaign_code: "daily", daily_checkin: { checked_in_today: true } }] } } } });
-  assert.equal((await engine.run((await store.account()).secret)).outcome, "done");
-  const record = (await readdir(checkins))[0];
-  const before = await readFile(join(checkins, record), "utf8");
+  await mkdir(checkins, { mode: 0o700 });
+  const record = "legacy-checkin.json";
+  const before = JSON.stringify({ day: "2026-11-14", state: "done" });
+  await writeFile(join(checkins, record), before, { mode: 0o600 });
   assert.equal((await createStore(root).list())[0].uid, "a:0");
   assert.equal(await readFile(join(root, "accounts.json"), "utf8"), accounts);
   assert.equal(await readFile(join(checkins, record), "utf8"), before);

@@ -10,7 +10,7 @@ AI写的说明太麻烦了，打开powershell输入npm start启动，打开 `htt
 
 支持自定义地址的 OpenAI **Chat Completions / Responses** 和 **Claude Messages** 文本协议，适用于相应模式下的 Cherry Studio、Chatbox、Open WebUI、OpenAI SDK、Anthropic SDK 等。客户端应允许填写自定义模型 ID，或通过模型列表加载。具体第三方客户端尚未逐个实机验收。
 
-运行时无 npm 依赖，需 Node.js **22 或更新版本**。
+运行时无 npm 依赖，需 Node.js **22 或更新版本**。本地图片验证识别可选，需要另行安装 Python 环境与本地模型。
 
 ## 1. 在网关机器上登录一次
 
@@ -20,7 +20,7 @@ Windows PowerShell：
 npm run login
 ```
 
-- 自动打开独立 Chrome / Edge 登录窗口；按豆包官网流程扫码或输入手机验证码，人工完成官网验证。
+- 自动打开独立 Chrome / Edge 登录窗口；按豆包官网流程扫码或输入手机验证码。安装本地识别环境后会自动尝试图片验证；无法可靠识别时保留窗口供本人完成。
 - 在浏览器打开终端给出的 `http://127.0.0.1:随机端口/随机路径/` 确认页面，点击 **接入网关**，完成身份核验后保存账号。
 - 不是日常浏览器资料，不会替换日常登录；不需要把 Cookie 或验证码粘贴到客户端。
 - 确认页面和临时浏览器只在登录期间存在，结束或取消后关闭；登录流程最多持续 10 分钟。
@@ -32,6 +32,16 @@ npm run login -- --browser edge
 npm run login -- --browser chrome
 npm run login -- --loopback
 ```
+
+## 人机验证弹窗
+
+检测到官网人机验证后，立即将当前账号的独立豆包验证窗口置前，显示“需要人工验证”，由本人完成滑块、旋转或点选等验证码。管理台同时显示人工验证提示，登录弹窗显示“等待人工验证”。运行时无需安装 Python 或识别模型。
+
+人工等待默认 5 分钟，使用独立期限；完成官网验证码后，原请求会自动继续。同一账号会话的并发请求共用一个验证窗口和截止时间。
+
+官网确认验证通过并核对账号身份后才更新会话；网关只在收到回答或会话确认之前，针对明确的验证拒绝恢复并重试原请求一次。关闭验证码、取消原请求或人工等待超时会结束本次恢复并清理临时窗口。
+
+配置与实测范围见 [人工验证说明](docs/CAPTCHA.md)。
 
 ## 2. 启动网关，获取客户端密钥
 
@@ -59,6 +69,12 @@ npm run models
 | API Key | `npm run key` 输出的 `sk-dw-…`，或你配置的 `DW_API_KEY` |
 | 模型 | 从客户端“获取模型”加载，或填写 `npm run models` 返回的 **id** |
 
+### DeepSeek Harness
+
+DSH 使用 OpenAI Chat Completions 并开启流式输出。携带工具时，普通回答和思考逐段流出，工具 JSON 等完整校验后发送。
+
+“Deep diving” 和首 token 的时间包含客户端超时重试。需要直接观察首次失败时，在该 provider 的 `retryPolicy` 中设置 `mode: normal`、`maxRetries: 0`。网关没有提供真实 token 用量，DSH 的 `0 tok/s` 无法用于测速。
+
 ## 可选配置
 
 无需 `.env` 即可运行。需要定制时：
@@ -81,6 +97,13 @@ Copy-Item .env.example .env
 | `DW_HIDE_HISTORY` | `true` | 反代会话完成、取消或超时后，自动从豆包工作历史列表隐藏本次新建会话；设为 `false` 保留记录 |
 | `DW_TIMEOUT_MS` | `120000` | 每次 HTTP 请求最长时间，范围 1000–600000 ms |
 | `DW_MAX_CONCURRENCY` | `3` | 每个账号最多同时进行的对话数，三种协议共享，范围 1–16 |
+| `DW_CAPTCHA_TIMEOUT_MS` | `60000` | 官网确认人工验证成功后的账号核验期限，范围 10000–180000 ms |
+| `DW_CAPTCHA_MANUAL_FALLBACK` | `true` | 检测到人机验证时立即弹窗提示人工完成；设为 `false` 关闭弹窗与请求验证恢复 |
+| `DW_CAPTCHA_MANUAL_TIMEOUT_MS` | `300000` | 请求中人工验证的独立等待期限，范围 10000–600000 ms；官网确认后恢复普通请求超时 |
+| `DW_CAPTCHA_BROWSER` | `auto` | 验证浏览器，可选 `auto` / `chrome` / `edge` / `doubao` / `chromium` |
+| `DW_CAPTCHA_TRANSPORT` | `pipe` | 浏览器通信方式，可用 `port` 启用本机随机端口兼容模式 |
+
+当前版本使用人工验证模式。旧的 `DW_AUTO_CAPTCHA`、`DW_CAPTCHA_MAX_ATTEMPTS` 和 `DW_CAPTCHA_PYTHON` 配置不会启动识别进程。
 
 ## 账号池管理台（8786）
 
@@ -89,7 +112,6 @@ Copy-Item .env.example .env
 - **账号池**：查看真实账号，按名称 / UID 搜索，筛选启用状态，修改名称、启停账号、切换默认账号和移除本地账号。
 - **添加账号**：选择浏览器打开独立登录窗口，完成官网登录与验证后，在管理台点击“确认接入”。同一账号重登会更新会话；关闭弹窗后可继续后台登录，也可取消流程。
 - **刷新状态**：核验已启用账号的登录会话并查询实际额度；列表每 15 秒仅同步本地账号状态，不会自动请求上游或消耗对话额度。
-- **一键签到**：在后台逐个为所有已启用账号查询每日任务、领取奖励并回查确认；可在列表的礼物按钮或账号管理中为单个账号签到。页面显示进度、逐项结果和上游返回的奖励，成功后刷新实际额度。停用账号不参与批量签到，但可手动单独签到。
 - **模型目录**：按账号查询实际可用模型并复制模型 ID。
 - **接入配置**：查看 Base URL、按需显示 / 复制 API Key，以及当前端口、超时、并发和数据目录。
 
@@ -105,7 +127,7 @@ node server.mjs disable "账号UID"     # 停用账号
 npm run usage                         # 查询当前账号额度
 ```
 
-第一个账号默认为服务账号。最多保存 64 个账号，凭据文件最多 2 MiB，超过限制会拒绝写入而不损坏已有数据。每个请求只使用一个账号；不自动轮换、重试或尝试第二个账号，以免重复消耗额度。会话过期返回 `session_expired`，请运行 `npm run login` 更新账号。并发超过上限返回 429。
+第一个账号默认为服务账号。最多保存 64 个账号，凭据文件最多 2 MiB，超过限制会拒绝写入而不损坏已有数据。每个请求只使用一个账号，验证恢复后的重试也保持该账号；不自动轮换到其他账号。普通限流不触发验证恢复。会话过期返回 `session_expired`，请运行 `npm run login` 更新账号。并发超过上限返回 429。
 
 账号管理写入有进程锁，重复执行时返回冲突，不覆盖其他进程的结果。若异常退出遗留 `accounts.lock` 或 `config.lock`，确认相关管理/初始化进程已停止后，才移除对应锁文件并重试。
 
@@ -206,6 +228,9 @@ with claude.messages.stream(
 ```powershell
 npm test
 npm run check
+npm run check:admin
+npm run check:captcha
+npm run captcha:test                 # 可选：历史本地识别工具测试；人工验证功能不需要它
 npm pack --ignore-scripts --dry-run
 npm run smoke:browser                # 可选：真实浏览器、无界面空白页、不登录账号
 ```

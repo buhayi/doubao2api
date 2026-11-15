@@ -89,7 +89,7 @@ Magpie 原生提供账号切换、模型选择及调用入口；本插件的提�
 
 GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/magpie-doubaowork-auth)。仓库以 `magpie-plugin` 标记，采用 Magpie 的 [GitHub 第三方插件发现机制](https://usemagpie.ai/docs/plugins#publishing-and-listing)。`package.json` 和可直接运行的入口均在仓库根目录，无需预先构建。
 
-仓库仅包含插件源码、测试及说明，不包含作者或其他用户的账号、Cookie、验证码、签到账本或 Magpie 配置。安装后请登录自己的账号。
+仓库仅包含插件源码、测试及说明，不包含作者或其他用户的账号、Cookie、验证码或 Magpie 配置。安装后请登录自己的账号。
 
 ## 429：区分人工验证与普通限流
 
@@ -122,7 +122,6 @@ GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/m
 | 完整历史         | 每次发送完整角色历史到一个新建的豆包会话，不跨客户端复用历史会话                                                          |
 | 客户端工具       | **实验性提示词桥**，不是上游原生 function calling；工具声明写入文本，解析模型按约定返回的工具名与参数。插件本身不执行工具 |
 | 图片、音频、文件 | 第一版仅文本；其他内容会明确提示，不静默丢弃附件                                                                          |
-| 每日签到         | 默认关闭，双重开关；结果不确定时保留记录，后续只查询，不重复领取                                                          |
 | 服务依赖         | 不监听通用 API 端口；仅登录期间启动随机路径的临时 loopback 状态页                                                         |
 
 为避免把未知参数写成官方规格，未下发上下文信息时使用保守默认值：上下文 `32768`、输出 `4096`。这些是插件配置值，不是模型真实容量认证。未编造 token 用量或价格。输出值是客户端模型元数据，并非上游硬性生成长度控制；`max_tokens`、`temperature` 等采样参数尚未映射到豆包请求。
@@ -135,9 +134,7 @@ GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/m
 
 - **本机随机端口兼容登录**：默认关闭，仅用于 Chrome++ 等丢失管道的启动器，详见上文。
 - **实验性客户端工具桥**：默认开启。纯文本使用可关闭。带工具时先缓冲并校验完整回答，再交付客户端；文本请求仍逐块流式。
-- **允许每日签到**：默认关闭。开启后，还需要在 Magpie 原生每日签到设置中选择该账号。
 
-签到账本按北京时间分日，写入领取前创建跨宿主原子保留记录，适配 Magpie 应用与 CLI 同时运行。出现网络中断、人工验证或未确认状态时，不自动重复提交。保留记录需要人工核对时，先检查豆包官方页面，不要盲目删除账本重试。签到领取尚未进行真实在线验收。
 
 高级启动参数可通过插件 JSON options 设置：`browser: "chrome" | "edge" | "chromium" | "doubao"`（`doubao` 仅 Windows 可用，其他平台会在登录开始时明确报错）、`contextLimit`、`outputLimit`。原生布尔开关由 Magpie 保存并实时读取。
 
@@ -147,10 +144,10 @@ GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/m
 - 本人确认接入并核验成功、取消、关窗或 10 分钟超时后清理专用浏览器；登录页只展示进度，不展示 Cookie。
 - 如果登录 Cookie 缺少工作版设备标识，Windows 上仅读取本机豆包客户端（`DoubaoWork\User Data` 优先，其次 `Doubao\User Data`）`Local State` 中的设备 ID；macOS 只尝试 `DoubaoWork`；Linux 只尝试当前用户 `$XDG_CONFIG_HOME/DoubaoWork`（默认 `~/.config/DoubaoWork`）。仅读缺失字段，不覆盖浏览器已捕获的真实标识。
 - 登录快照放在 Magpie 的私有 OAuth access 字段中，`dwc1.` 后为 base64url **编码而非加密**。保持 Magpie 配置目录私有，避免分享 `plugin-auth.json`、其备份和本机调试日志。
-- 本机已核验 Magpie 账号库权限为 `0600`，本插件临时目录 `0700`、签到账本 `0600`（macOS）。Windows 临时浏览器目录使用当前用户与 SYSTEM 的 ACL。文件权限不替代磁盘加密。
+- 本机已核验 Magpie 账号库权限为 `0600`，本插件临时目录 `0700`（macOS）。Windows 临时浏览器目录使用当前用户与 SYSTEM 的 ACL。文件权限不替代磁盘加密。
 - 会话失效会标记需重新登录；不保存验证码，不绕过人工验证，也不伪造设备 ID。
 
-从 **v0.1.6** 起，独立浏览器首次握手有 15 秒冷启动宽限，连接后的命令仍为 7 秒（Windows 10 秒）超时；不自动重复登录、签到或上游对话请求。
+从 **v0.1.6** 起，独立浏览器首次握手有 15 秒冷启动宽限，连接后的命令仍为 7 秒（Windows 10 秒）超时；不自动重复登录或上游对话请求。
 
 ## 验证
 
@@ -159,7 +156,7 @@ npm test
 npm run check
 ```
 
-本地回归测试覆盖：账号隔离、模型解析、严格 SSE 结束、分片中文、截断流、工具声明校验、登录成功 / 取消 / 来源校验 / 清理，以及跨宿主签到去重。
+本地回归测试覆盖：账号隔离、模型解析、严格 SSE 结束、分片中文、截断流、工具声明校验、登录成功 / 取消 / 来源校验 / 清理。
 
 CI 配置覆盖 Linux / Windows 单元测试、Windows Chrome / Edge 与 Linux Chrome（Xvfb、非 root、沙箱开启）的两种通信模式、隔离启动与退出清理，不使用账号。运行结果见 [GitHub Actions](https://github.com/245678000000/magpie-doubaowork-auth/actions)。豆包客户端不在公共 runner 中，专用 smoke 测试会明确 SKIP，成功的 CI 不代表豆包实机登录通过。Chrome++ Next、Linux 桌面扫码及真实账号模型调用仍需各自环境复验。
 
@@ -169,7 +166,7 @@ CI 配置覆盖 Linux / Windows 单元测试、Windows Chrome / Edge 与 Linux C
 - 原生供应商页显示已登录，加载 **10 个当时可用模型**；不同账号或日期的目录可能不同。
 - `magpie provider test doubaowork-direct seed-lite-7b`：**chat 通过，约 3.9 秒**。
 - `seed-lite-7b` 实验性提示词工具桥：HTTP 200，返回 `tool_calls`，工具名及参数符合声明；未执行任何工具。
-- 尚未将第二个账号接入本插件；多账号结构有离线覆盖，第二个真实账号及签到领取仍待后续验收。
+- 尚未将第二个账号接入本插件；多账号结构有离线覆盖，第二个真实账号仍待后续验收。
 - 该记录不代表所有模型、附件、工具调用或所有客户端均已在线验证。
 
 ## 项目结构
@@ -181,7 +178,6 @@ completion.mjs      对话适配与实验性工具桥
 stream.mjs          上游 SSE 解析和严格完成语义
 login.mjs           临时登录进度页与认证回调
 browser-login.mjs   独立浏览器和匿名管道生命周期
-checkin.mjs         opt-in 签到、回查与本地防重复记录
 test/               不含真实凭据的本地回归测试
 ```
 

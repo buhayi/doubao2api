@@ -1,6 +1,6 @@
 {
   "name": "doubao-gateway",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "豆包工作通用 OpenAI 兼容网关：浏览器登录、API Key 鉴权、动态模型和流式对话，同时保留 Magpie 插件入口",
   "type": "module",
   "main": "./index.mjs",
@@ -21,6 +21,12 @@
     "scripts/doubao-browser-smoke.mjs",
     "scripts/isolated-browser-smoke.mjs",
     "scripts/gateway-browser-smoke.mjs",
+    "scripts/setup-captcha.mjs",
+    "scripts/captcha-tests.mjs",
+    "captcha/solver.py",
+    "captcha/fixtures.py",
+    "captcha/tests.py",
+    "captcha/requirements.txt",
     "gateway/",
     ".env.example",
     "docs/"
@@ -53,16 +59,19 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.mjs && node --check protocol.mjs && node --check completion.mjs && node --check stream.mjs && node --check login.mjs && node --check checkin.mjs && node --check browser-login.mjs && node --check windows-browser.mjs && node --check scripts/windows-browser-smoke.mjs && node --check scripts/doubao-browser-smoke.mjs && node --check posix-browser.mjs && node --check cdp-port.mjs && node --check scripts/isolated-browser-smoke.mjs && node --check server.mjs && node --check gateway/config.mjs && node --check gateway/store.mjs && node --check gateway/history.mjs && node --check gateway/checkin.mjs && node --check gateway/compat.mjs && node --check gateway/responses.mjs && node --check gateway/anthropic.mjs && node --check gateway/server.mjs && node --check gateway/cli.mjs && node --check scripts/gateway-browser-smoke.mjs",
+    "check": "node --check index.mjs && node --check protocol.mjs && node --check completion.mjs && node --check stream.mjs && node --check login.mjs && node --check browser-login.mjs && node --check windows-browser.mjs && node --check scripts/windows-browser-smoke.mjs && node --check scripts/doubao-browser-smoke.mjs && node --check posix-browser.mjs && node --check cdp-port.mjs && node --check scripts/isolated-browser-smoke.mjs && node --check server.mjs && node --check gateway/config.mjs && node --check gateway/store.mjs && node --check gateway/history.mjs && node --check gateway/compat.mjs && node --check gateway/responses.mjs && node --check gateway/anthropic.mjs && node --check gateway/server.mjs && node --check gateway/cli.mjs && node --check scripts/gateway-browser-smoke.mjs",
     "start": "node server.mjs",
     "admin": "node server.mjs admin",
-    "check:admin": "node --check gateway/checkin.mjs && node --check gateway/admin.mjs && node --check gateway/admin/app.mjs && node --check gateway/admin/ui.mjs",
+    "check:admin": "node --check gateway/admin.mjs && node --check gateway/admin/app.mjs && node --check gateway/admin/ui.mjs",
     "login": "node server.mjs login",
     "accounts": "node server.mjs accounts",
     "models": "node server.mjs models",
     "usage": "node server.mjs usage",
     "key": "node server.mjs key",
-    "smoke:browser": "node scripts/gateway-browser-smoke.mjs"
+    "smoke:browser": "node scripts/gateway-browser-smoke.mjs",
+    "captcha:setup": "node scripts/setup-captcha.mjs",
+    "captcha:test": "node scripts/captcha-tests.mjs",
+    "check:captcha": "node --check captcha.mjs && node --check captcha-browser.mjs && node --check verification.mjs && node --check scripts/setup-captcha.mjs && node --check scripts/captcha-tests.mjs"
   },
   "repository": {
     "type": "git",

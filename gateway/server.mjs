@@ -102,6 +102,7 @@ function cors(req, res, allowed) {
 export function createGateway({
   store, apiKey, api = createApi(), accountId, corsOrigins = [], promptTools = true, hideHistory = true,
   timeoutMs = 120000, maxConcurrency = 3, heartbeatMs = 15000,
+  captchaManualTimeoutMs = 300000,
   responseCache = {}, historyCleanup = {},
 } = {}) {
   const expectedKey = digest(validateApiKey(apiKey));
@@ -113,9 +114,25 @@ export function createGateway({
   const server = createServer(async (req, res) => {
     const disconnected = new AbortController();
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(fail(504, "请求超时；网关不会自动重试，以免重复消耗额度。")), timeoutMs);
-    timer.unref();
+    let timer;
+    const armTimeout = (ms, message) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => timeout.abort(fail(504, message)), ms);
+      timer.unref();
+    };
+    armTimeout(timeoutMs, "请求超时；网关不会自动重试，以免重复消耗额度。");
     const signal = AbortSignal.any([disconnected.signal, timeout.signal, shutdown.signal]);
+    let waitingForHuman = false;
+    const onVerification = (verification) => {
+      if (signal.aborted || res.destroyed || res.writableEnded) return;
+      if (verification?.state === "manual" && !waitingForHuman && Number.isSafeInteger(verification.expiresAt)) {
+        waitingForHuman = true;
+        armTimeout(Math.max(1, Math.min(captchaManualTimeoutMs, verification.expiresAt-Date.now())), "人工验证等待已超时，请重新发起请求。");
+      } else if (waitingForHuman && ["verifying", "verified", "failed", "expired", "cancelled"].includes(verification?.state)) {
+        waitingForHuman = false;
+        armTimeout(timeoutMs, "请求超时；网关不会自动重试，以免重复消耗额度。");
+      }
+    };
     const abort = () => { if (!res.writableFinished) disconnected.abort(); };
     req.once("aborted", abort);
     req.on("error", abort); // IncomingMessage may emit an error after an interrupted upload.
@@ -176,13 +193,13 @@ export function createGateway({
       if (signal.aborted) throw signal.reason;
       if (previous && previous.uid !== account.uid) throw fail(409, "默认账号已切换，请发送完整 input 历史开始新对话，或切回原账号续接。");
       if (path === "/v1/messages/count_tokens") {
-        const catalog = await api.catalog(account.secret, { signal });
+        const catalog = await api.catalog(account.secret, { signal, onVerification });
         if (!Object.hasOwn(catalog.models, body.model)) throw fail(404, "该账号当前模型目录没有这个模型，请刷新目录后重选。");
         return json(res, 200, { input_tokens: inputTokens(body) });
       }
-      if (path === "/v1/usage") return json(res, 200, await api.usage(account.secret, { signal }));
+      if (path === "/v1/usage") return json(res, 200, await api.usage(account.secret, { signal, onVerification }));
       if (method === "GET") {
-        const catalog = await api.catalog(account.secret, { signal });
+        const catalog = await api.catalog(account.secret, { signal, onVerification });
         const models = Object.values(catalog.models).map((model) => ({
           id: model.id, object: "model", created: 0, owned_by: "doubaowork", name: model.name,
         }));
@@ -217,7 +234,7 @@ export function createGateway({
       }
       let historyOutcome = hideHistory ? "auto-cleanup" : "retained";
       res.setHeader("X-Doubao-History", historyOutcome);
-      let response = await createCompletion(api, account.secret, body, { signal, promptTools, idleMs: timeoutMs,
+      let response = await createCompletion(api, account.secret, body, { signal, promptTools, idleMs: timeoutMs, onVerification,
         cleanupConversation: hideHistory ? async (conversation) => {
           historyOutcome = await history.clean(account.secret, conversation);
           return historyOutcome;

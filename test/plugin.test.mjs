@@ -38,7 +38,7 @@ test("Magpie 原生钩子，默认无虚构模型，账号凭据逐请求读取�
   const hooks = _internal.createHooks(
     { directory: "/fixture" },
     {},
-    { api, login: {}, checkin: {} },
+    { api, login: {} },
   );
   const cfg = {};
   await hooks.config(cfg);
@@ -99,7 +99,6 @@ test("失效登录返回原生 expired 标记，目录失联保留旧模型", as
         },
       },
       login: {},
-      checkin: {},
     },
   );
   const old = { models: { known: { id: "known" } } };
@@ -110,20 +109,13 @@ test("失效登录返回原生 expired 标记，目录失联保留旧模型", as
     ["default"],
   );
 });
-test("原生插件开关即时生效：关闭工具桥和双重签到 opt-in", async () => {
-  const values = { prompt_tools: true, checkin_enabled: false };
-  let claims = 0;
+test("原生插件开关即时生效：关闭工具桥，签到入口已移除", async () => {
+  const values = { prompt_tools: true };
   const hooks = _internal.createHooks(
     { magpie: { option: (_provider, key) => values[key] } },
     {},
     {
       login: {},
-      checkin: {
-        run: async () => {
-          claims++;
-          return { outcome: "done" };
-        },
-      },
       api: {
         catalog: async () => ({
           bot: "B",
@@ -139,7 +131,6 @@ test("原生插件开关即时生效：关闭工具桥和双重签到 opt-in", a
     [
       ["browser_loopback", false],
       ["prompt_tools", true],
-      ["checkin_enabled", false],
     ],
   );
   assert.equal(
@@ -151,14 +142,7 @@ test("原生插件开关即时生效：关闭工具桥和双重签到 opt-in", a
     (await hooks.provider.models({}, { auth })).flash.tool_call,
     false,
   );
-  assert.equal(
-    (await hooks.auth.checkin(async () => auth)).outcome,
-    "inactive",
-  );
-  assert.equal(claims, 0);
-  values.checkin_enabled = true;
-  assert.equal((await hooks.auth.checkin(async () => auth)).outcome, "done");
-  assert.equal(claims, 1);
+  assert.equal(Object.hasOwn(hooks.auth, "checkin"), false);
 });
 
 test("客户端只接收规范错误分类与数字上游码，不携带挑战内容", async () => {
@@ -184,7 +168,7 @@ test("客户端只接收规范错误分类与数字上游码，不携带挑战�
 test("Chrome++ loopback login stays opt-in and is read live from the native switch", async () => {
   const calls = [], values = {};
   const hooks = _internal.createHooks({ directory: "/fixture", magpie: { option: (_provider, key) => values[key] } }, {}, {
-    api: {}, checkin: {}, login: { start: async (options) => { calls.push(options); return {}; } },
+    api: {}, login: { start: async (options) => { calls.push(options); return {}; } },
   });
   await hooks.auth.methods[0].authorize();
   assert.equal(calls[0].transport, "pipe");

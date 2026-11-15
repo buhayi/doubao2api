@@ -6,7 +6,6 @@ import { createApi, fail } from "../protocol.mjs";
 import { createLoginManager } from "../login.mjs";
 import { baseUrl } from "./config.mjs";
 import { protocolOptions } from "./compat.mjs";
-import { createPoolCheckin } from "./checkin.mjs";
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -16,7 +15,7 @@ const assets = new Map([
   ["/ui.mjs", ["ui.mjs", "text/javascript; charset=utf-8"]],
 ]);
 const digest = (value) => createHash("sha256").update(value).digest();
-const activeStates = new Set(["starting", "waiting", "awaiting_confirmation", "importing"]);
+const activeStates = new Set(["starting", "waiting", "verifying", "awaiting_confirmation", "importing"]);
 const reasonCodes = new Set(["session_expired", "rate_limited", "verification_required"]);
 
 function errorView(error) {
@@ -87,7 +86,7 @@ function usageView(usage) {
   };
 }
 
-export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus } = {}) {
+export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus, captchaStatus, verificationStatus } = {}) {
   if (!store) throw Error("需要提供管理台账号存储。");
   const connection = baseUrl(config.host || "127.0.0.1", config.port || 8787);
   const token = randomBytes(32).toString("hex");
@@ -98,27 +97,9 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
   const checkVersions = new Map();
   let checkVersion = 0;
   let job = null;
-  const checkin = createPoolCheckin({ store, api, shutdown: shutdown.signal, timeoutMs: Math.min(config.timeoutMs || 30000, 30000), refreshUsage });
-
-  async function refreshUsage(account, signal) {
-    const version = ++checkVersion;
-    const result = { state: "ok", checkedAt: Date.now(), updatedAt: account.updatedAt };
-    try {
-      result.usage = usageView(await api.usage(account.secret, { signal }));
-      signal.throwIfAborted();
-      rememberCheck(account.uid, result, version);
-    } catch (error) {
-      const view = errorView(error);
-      result.usageError = "额度刷新未完成，请点击检测重试。";
-      if (view.error.code === "session_expired") { result.state = "expired"; result.message = "登录已失效，请重新登录。"; }
-      rememberCheck(account.uid, result, version);
-      throw error;
-    }
-  }
   function rememberCheck(uid, result, version) {
     const previous = checks.get(uid);
-    // A detection started before a claim must not replace the quota refreshed
-    // after that claim, even when the older upstream response arrives last.
+    // An older detection must not replace a more recent result.
     if (previous?.updatedAt === result.updatedAt && (checkVersions.get(uid) || 0) > version) return previous;
     checks.set(uid, result);
     checkVersions.set(uid, version);
@@ -135,6 +116,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       message: current?.message || job.message || "",
       ...(job.active && job.flow?.url ? { url: job.flow.url } : {}),
       ...(current?.expiresAt ? { expiresAt: current.expiresAt } : {}),
+      ...(current?.captcha ? { captcha: current.captcha } : {}),
       ...(job.result ? { result: job.result } : {}),
     };
   }
@@ -206,8 +188,9 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
     try {
       online = health ? Boolean(await health()) : (await fetch(new URL("/health", connection), { signal: AbortSignal.any([signal, AbortSignal.timeout(1500)]) })).ok;
     } catch { /* A stopped API gateway does not prevent account management. */ }
-    const accounts = list.map((account) => ({ ...account, check: checks.get(account.uid)?.updatedAt === account.updatedAt ? checks.get(account.uid) : { state: "unchecked" }, checkin: checkin.accountStatus(account.uid) }));
-    return { accounts, gateway: { online, baseUrl: connection, fixedAccountId: config.accountId || null }, login: loginStatus(), checkin: checkin.status() };
+    const accounts = list.map((account) => ({ ...account, check: checks.get(account.uid)?.updatedAt === account.updatedAt ? checks.get(account.uid) : { state: "unchecked" } }));
+    return { accounts, gateway: { online, baseUrl: connection, fixedAccountId: config.accountId || null,
+      verification: verificationStatus?.() || null }, login: loginStatus() };
   }
 
   const server = createServer(async (req, res) => {
@@ -242,17 +225,14 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       const provided = req.headers["x-doubao-admin"];
       if (typeof provided !== "string" || !timingSafeEqual(digest(provided), expectedToken)) throw fail(403, "管理会话已失效，请刷新页面。");
       if (path === "/api/overview" && req.method === "GET") return send(res, 200, await overview(signal));
-      if (path === "/api/checkin") {
-        if (req.method === "GET") return send(res, 200, checkin.status());
-        if (req.method === "POST") { await body(req, signal); return send(res, 202, await checkin.start()); }
-        res.setHeader("Allow", "GET, POST");
-        throw fail(405, "此接口不支持这个请求方法。");
-      }
       if (path === "/api/settings" && req.method === "GET") return send(res, 200, {
         baseUrl: connection, adminPort: server.address().port, dataDir: store.root,
         timeoutMs: config.timeoutMs || 120000, maxConcurrency: config.maxConcurrency || 3,
         promptTools: config.promptTools !== false, fixedAccountId: config.accountId || null,
         hideHistory: config.hideHistory !== false, historyCleanup: historyStatus?.() || null,
+        captcha: { manualFallback: config.captchaManualFallback !== false, manualTimeoutMs: config.captchaManualTimeoutMs || 300000,
+          ...(captchaStatus ? await captchaStatus() : { enabled: config.captchaManualFallback !== false, mode: "manual", automatic: false,
+            state: config.captchaManualFallback === false ? "disabled" : "manual", message: "检测到人机验证时，立即打开人工验证窗口。" }) },
         protocols: protocolOptions(connection),
       });
       if (path === "/api/key" && req.method === "POST") {
@@ -272,7 +252,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         if (job?.active) { job.controller.abort(); await job.promise; }
         return send(res, 200, loginStatus());
       }
-      const match = /^\/api\/accounts\/([^/]+)(?:\/(default|check|checkin|models))?$/.exec(path);
+      const match = /^\/api\/accounts\/([^/]+)(?:\/(default|check|models))?$/.exec(path);
       if (match) {
         let uid;
         try { uid = decodeURIComponent(match[1]); } catch { throw fail(400, "账号 ID 编码无效。"); }
@@ -284,10 +264,9 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
           return send(res, 200, { models: Object.values(catalog.models).map(({ id, name }) => ({ id, name })) });
         }
         if (action === "check" && req.method === "POST") { await body(req, signal); return send(res, 200, await checkAccount(uid, signal)); }
-        if (action === "checkin" && req.method === "POST") { await body(req, signal); return send(res, 202, await checkin.start(uid)); }
         if (action === "default" && req.method === "POST") { await body(req, signal); await store.use(uid); return send(res, 200, { ok: true }); }
         if (!action && req.method === "PATCH") { await store.update(uid, await body(req, signal)); return send(res, 200, { ok: true }); }
-        if (!action && req.method === "DELETE") { await body(req, signal); await store.remove(uid); checks.delete(uid); checkVersions.delete(uid); checkin.forget(uid); return send(res, 200, { ok: true }); }
+        if (!action && req.method === "DELETE") { await body(req, signal); await store.remove(uid); checks.delete(uid); checkVersions.delete(uid); return send(res, 200, { ok: true }); }
         res.setHeader("Allow", action === "models" ? "GET" : action ? "POST" : "PATCH, DELETE");
         throw fail(405, "此接口不支持这个请求方法。");
       }
@@ -318,7 +297,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
           server.close((error) => error ? reject(error) : resolve());
           server.closeAllConnections();
         }) : Promise.resolve();
-        await Promise.all([closed, job?.promise, checkin.close()]);
+        await Promise.all([closed, job?.promise]);
       })();
     },
   };

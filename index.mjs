@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { createApi, readAuth, PROVIDER, ORIGIN, fail } from "./protocol.mjs";
 import { createCompletion } from "./completion.mjs";
 import { createLoginManager } from "./login.mjs";
-import { createCheckin } from "./checkin.mjs";
 function errorResponse(error) {
   const status = Number(error?.status) || 502;
   const reason = [
@@ -110,10 +109,7 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
     return typeof value === "boolean" ? value : fallback;
   };
   const promptTools = () => flag("prompt_tools", options.promptTools !== false);
-  const login = dependencies.login || createLoginManager({ root, api }),
-    checkin =
-      dependencies.checkin ||
-      createCheckin({ root: join(root, "checkins"), api });
+  const login = dependencies.login || createLoginManager({ root, api });
   return {
     config: async (cfg) => {
       cfg.provider ??= {};
@@ -141,15 +137,6 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
           description:
             "将客户端工具声明随文本发给豆包，并解析返回的调用；这不是上游原生函数调用。插件本身不执行工具。",
           default: true,
-        },
-        {
-          key: "checkin_enabled",
-          label: "允许每日签到",
-          description:
-            "默认关闭。开启后仍需在 Magpie 每日签到中选中该账号；未知领取结果只回查，不重复提交。",
-          confirm:
-            "开启后，Magpie 每日签到可为你选中的豆包工作账号提交领取请求。",
-          default: false,
         },
       ],
       methods: [
@@ -222,15 +209,6 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
             windows: [],
           };
         }
-      },
-      async checkin(getAuth) {
-        if (!flag("checkin_enabled", options.checkinEnabled === true))
-          return {
-            outcome: "inactive",
-            message:
-              "豆包工作插件签到默认关闭；开启插件选项并选择 Magpie 每日签到后生效。",
-          };
-        return checkin.run(readAuth(await getAuth()));
       },
     },
     provider: {

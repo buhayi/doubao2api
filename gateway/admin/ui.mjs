@@ -6,7 +6,6 @@ const paths = {
   shield: ["M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7l-9-4Z", "m8 12 3 3 5-6"],
   plus: ["M12 5v14", "M5 12h14"],
   refresh: ["M20 7v5h-5", "M4 17v-5h5", "M6.5 6.5A8 8 0 0 1 20 12", "M4 12a8 8 0 0 0 13.5 5.5"],
-  gift: ["M3 8h18v4H3Z", "M5 12v9h14v-9", "M12 8v13", "M12 8H8.5a2.5 2.5 0 1 1 2.4-3.2L12 8Z", "M12 8h3.5a2.5 2.5 0 1 0-2.4-3.2L12 8Z"],
   search: ["M21 21l-5-5"],
   star: ["m12 3 2.8 5.7 6.3.9-4.5 4.4 1 6.2-5.6-3-5.6 3 1-6.2L2.9 9.6l6.3-.9L12 3Z"],
   chevron: ["m9 5 7 7-7 7"],
@@ -76,23 +75,6 @@ export const statusMeta = {
 export function statusPill(text, kind = "neutral") {
   return node("span", { class: `status-pill ${kind}` }, node("span", { class: "status-dot" }), text);
 }
-export const checkinMeta = {
-  unchecked: ["未查询", "neutral"], queued: ["等待签到", "accent"], running: ["正在签到", "accent"],
-  claimed: ["领取成功", "success"], done: ["今日已签到", "success"],
-  inactive: ["暂无签到活动", "neutral"], ineligible: ["暂不可领取", "warning"],
-  captcha: ["需官网验证", "warning"], expired: ["需重新登录", "danger"],
-  failed: ["待核对 / 重试", "warning"], skipped: ["已跳过", "neutral"], cancelled: ["已停止", "neutral"],
-};
-export function checkinBlock(result, compact = false) {
-  const [label, kind] = checkinMeta[result?.outcome] || checkinMeta.unchecked;
-  return node("div", { class: `checkin-stack${compact ? " compact" : ""}`, title: compact ? result?.message : undefined },
-    node("div", { class: "checkin-badges" }, statusPill(label, kind), Number.isFinite(result?.credit) && result.credit > 0 && node("span", { class: "checkin-credit" }, `+${result.credit.toLocaleString("zh-CN")} 额度`)),
-    result?.streak && node("small", { class: "muted" }, `连续签到 ${result.streak} 天`),
-    !compact && node("p", { class: "field-hint" }, result?.message || "点击签到查询今日任务，并领取可用奖励。"),
-    !compact && result?.usageError && node("p", { class: "field-hint" }, result.usageError),
-    !compact && result?.checkedAt && node("small", { class: "muted" }, `最近查询：${formatDate(result.checkedAt, true)}`),
-  );
-}
 export function formatDate(value, includeYear = false) {
   if (!value) return "—";
   const date = new Date(value);
@@ -114,14 +96,13 @@ export function quotaBlock(check, compact = false) {
     return node("div", { class: "quota-item" }, node("div", { class: "quota-caption" }, node("span", {}, window.name || "使用额度"), node("strong", {}, value)), used !== null && node("progress", { class: used >= 90 ? "quota-progress warning" : "quota-progress", max: 100, value: used, "aria-label": `${window.name || "额度"}已使用 ${used.toFixed(1)}%` }), !compact && (window.resetsAt || window.runsOutAt) && node("small", { class: "muted" }, `${window.runsOutAt ? "到期" : "重置"}时间：${formatDate((window.runsOutAt || window.resetsAt) * 1000, true)}`));
   }));
 }
-export function accountRow(account, actions, busy = false, signing = false) {
+export function accountRow(account, actions, busy = false) {
   const [session, kind] = statusMeta[account.check.state] || statusMeta.unchecked;
   return node("tr", { class: account.default ? "is-default" : "" },
     node("td", {}, node("div", { class: "account-identity" }, node("span", { class: `account-avatar ${avatarTone(account.uid || account.name)}` }, (account.name || "豆").slice(0, 1)), node("div", { class: "identity-copy" }, node("div", { class: "account-title" }, node("button", { class: "name-button", type: "button", onClick: () => actions.manage(account) }, account.name), account.default && node("span", { class: "default-tag" }, icon("star", 11), "默认")), node("small", { class: "mono muted uid-chip" }, account.uid)))),
     node("td", {}, node("div", { class: "status-stack" }, statusPill(account.enabled ? "已启用" : "已停用", account.enabled ? "success" : "neutral"), node("div", { class: `session-state ${kind}`, title: account.check.message || "" }, node("span", { class: "session-dot" }), session))),
     node("td", {}, quotaBlock(account.check, true)),
-    node("td", {}, checkinBlock(account.checkin, true)),
     node("td", { class: "date-cell" }, node("span", { class: "date-primary" }, formatDate(account.updatedAt)), node("small", { class: "muted" }, account.check.checkedAt ? `${formatDate(account.check.checkedAt)} 检测` : "尚未检测会话")),
-    node("td", {}, node("div", { class: "row-actions" }, iconButton("gift", `签到 ${account.name}`, () => actions.checkin(account), signing), iconButton("refresh", `检测 ${account.name}`, () => actions.check(account), busy, busy ? "is-busy" : ""), iconButton("star", account.default ? "当前默认账号" : `将 ${account.name} 设为默认`, () => actions.use(account), busy || account.default || !account.enabled, account.default ? "is-active-star" : ""), button("管理", { kind: "quiet", onClick: () => actions.manage(account), disabled: busy, symbol: "chevron" }))),
+    node("td", {}, node("div", { class: "row-actions" }, iconButton("refresh", `检测 ${account.name}`, () => actions.check(account), busy, busy ? "is-busy" : ""), iconButton("star", account.default ? "当前默认账号" : `将 ${account.name} 设为默认`, () => actions.use(account), busy || account.default || !account.enabled, account.default ? "is-active-star" : ""), button("管理", { kind: "quiet", onClick: () => actions.manage(account), disabled: busy, symbol: "chevron" }))),
   );
 }

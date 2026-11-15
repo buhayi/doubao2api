@@ -2,7 +2,7 @@
 import { readFile, writeFile, readdir, mkdir, chmod, lstat, open, rename, unlink } from "node:fs/promises";
 import { join, resolve, parse } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { readAuth, fail } from "../protocol.mjs";
+import { readAuth, saveAuth, fail } from "../protocol.mjs";
 import { protectWindowsProfile } from "../windows-browser.mjs";
 import { validateApiKey } from "./config.mjs";
 
@@ -14,6 +14,7 @@ async function protectRoot(root) {
   const entries = await readdir(root);
   if (entries.some((name) => ![".gitignore", "config.json", "accounts.json", "config.lock", "accounts.lock", "tmp", "checkins"].includes(name) && !/^(?:config|accounts)\.json\.[a-f0-9-]{36}\.tmp$/.test(name)))
     throw Error("数据目录含有其他文件；请使用网关专用目录，不会修改现有目录权限。");
+  // Keep accepting private records left by older versions after removing check-in.
   if (entries.includes("checkins")) {
     const checkins = await lstat(join(root, "checkins"));
     if (!checkins.isDirectory() || checkins.isSymbolicLink()) throw Error("签到记录必须保存在真实的专用目录中，不能使用文件或符号链接。");
@@ -153,6 +154,18 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
         const saved = state.accounts.find((a) => a.uid === account.uid);
         if (saved.enabled !== false) state.defaultUid ??= account.uid;
         return { uid: account.uid, name: account.name, updated: index >= 0 };
+      });
+    },
+    async refreshSession(uid, secret, { expectedCookieHeader } = {}) {
+      const account = accountFromLogin(saveAuth(secret));
+      if (account.uid !== uid) throw fail(409, "验证结果与当前账号不一致。");
+      return mutate((state) => {
+        const current = state.accounts.find((item) => item.uid === uid);
+        if (!current) throw fail(409, "账号已移除，验证结果未保存。");
+        if (readAuth(current.auth).cookieHeader !== expectedCookieHeader) throw fail(409, "账号会话已更新，验证结果未覆盖当前会话。");
+        current.auth = account.auth;
+        current.updatedAt = account.updatedAt;
+        return { uid: current.uid, updatedAt: current.updatedAt };
       });
     },
     async use(uid) {

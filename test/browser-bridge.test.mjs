@@ -78,6 +78,75 @@ async function setup(overrides = {}) {
     },
   };
 }
+
+test("浏览器登录：遇到验证码立即提示人工，不截取图片或自动识别", async (t) => {
+  let captures = 0, solves = 0, popups = 0, passed = false, rows = [];
+  const f = await setup({
+    autoCaptcha: true,
+    captchaSolver: { status: () => ({ enabled: true }), solve: async () => { solves++; throw Error("人工模式不应识别"); } },
+    launch: async () => ({
+      cookies: async () => rows,
+      dispose: async () => {},
+      captcha: {
+        capture: async () => { captures++; return { kind: "unsupported", request: { kind: "unsupported" } }; },
+        describe: async () => passed ? null : { kind: "unsupported" },
+        passed: async () => passed,
+        outcome: async () => ({ closed: false }),
+        requestManual: async () => { popups++; },
+      },
+    }),
+  });
+  t.after(() => f.done());
+  await f.login.start();
+  await f.inspect();
+  assert.equal(f.login.status().captcha.state, "manual");
+  assert.match(f.login.status().message, /人工验证/);
+  await f.inspect();
+  assert.equal(captures, 0);
+  assert.equal(solves, 0);
+  assert.equal(popups, 1);
+  assert.equal(f.imports, 0);
+  passed = true;
+  rows = [cookie];
+  await f.inspect();
+  await f.inspect();
+  assert.equal(f.imports, 1);
+  assert.equal(f.login.status().state, "success");
+});
+
+test("浏览器登录：三类验证码均直接弹窗，完成后再次出现验证码会重新提示", async (t) => {
+  for (const kind of ["slide", "rotate", "click"]) await t.test(kind, async (t) => {
+    let visible = false, popups = 0;
+    const f = await setup({ launch: async () => ({
+      cookies: async () => [],
+      dispose: async () => {},
+      captcha: {
+        describe: async () => visible ? { kind } : null,
+        passed: async () => visible ? false : null,
+        requestManual: async () => { popups++; },
+        capture: async () => { throw Error("人工模式不应截图"); },
+        apply: async () => { throw Error("人工模式不应自动提交"); },
+      },
+    }) });
+    t.after(() => f.done());
+    await f.login.start();
+    await f.inspect();
+    assert.equal(popups, 0);
+    visible = true;
+    await f.inspect();
+    await f.inspect();
+    assert.equal(popups, 1);
+    assert.equal(f.login.status().captcha.state, "manual");
+    visible = false;
+    await f.inspect();
+    assert.equal(f.login.status().captcha.state, "solved");
+    visible = true;
+    await f.inspect();
+    assert.equal(popups, 2);
+    assert.equal(f.login.status().captcha.state, "manual");
+    assert.equal(f.imports, 0);
+  });
+});
 test("只接受豆包 HTTPS 页面与根路径 Cookie", () => {
   for (const url of ["https://www.doubao.com/chat/", "https://doubao.com/"])
     assert(isDoubaoPage(url));

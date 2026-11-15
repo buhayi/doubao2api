@@ -51,6 +51,19 @@ async function fixture(t, options = {}) {
   return { root, store, api, admin, url, token, call };
 }
 
+test("管理台：展示人工验证状态与等待配置，完成后状态更新", async (t) => {
+  let state = "manual";
+  const f = await fixture(t, { verificationStatus: () => ({ accounts: { "a:0": { state, expiresAt: 12345 } } }) });
+  assert.equal((await (await f.call("/api/overview")).json()).gateway.verification.accounts["a:0"].state, "manual");
+  const settings = await (await f.call("/api/settings")).json();
+  assert.equal(settings.captcha.manualFallback, true);
+  assert.equal(settings.captcha.manualTimeoutMs, 300000);
+  assert.equal(settings.captcha.mode, "manual");
+  assert.equal(settings.captcha.automatic, false);
+  state = "verified";
+  assert.equal((await (await f.call("/api/overview")).json()).gateway.verification.accounts["a:0"].state, "verified");
+});
+
 test("管理台配置：默认 8786、可禁用、拒绝非法或重复端口", async (t) => {
   const cwd = await directory(t);
   assert.equal((await loadConfig({ cwd, env: {} })).adminPort, 8786);
@@ -167,258 +180,18 @@ test("管理台：正文和修改字段校验失败时不改变已有账号", as
   assert.equal(await readFile(file, "utf8"), before);
 });
 
-const dailyCampaign = (checked) => ({ data: {
-  campaign_code: "pc_incentive_task_mvp_v3",
-  tasks: [{ campaign_code: "daily", reward_mode: 2, task_status: 1, daily_checkin: { checked_in_today: checked, reward: { reward_amount: 200 }, continuous_days: checked ? 3 : 2 } }],
-} });
-const launchCampaign = { data: { ug_campaign_info: { campaign_group_code: "pc_incentive_task_mvp_v3" } } };
-async function waitCheckin(f) {
-  const deadline = Date.now() + 5000;
-  let status;
-  do {
-    status = await (await f.call("/api/checkin")).json();
-    if (!status.active) return status;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  } while (Date.now() < deadline);
-  assert.fail("签到任务没有在测试期限内完成");
-}
-async function waitUntil(predicate) {
-  for (let attempt = 0; attempt < 200; attempt++) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  assert.fail("未观察到预期的后台操作");
-}
-function claimFixture() {
-  const checked = new Set(), claims = [], queries = [];
-  return { checked, claims, queries, post: async (secret, path) => {
-    queries.push([secret.userId, path]);
-    if (path.endsWith("/launch")) return launchCampaign;
-    if (path.endsWith("/claim/")) { claims.push(secret.userId); checked.add(secret.userId); return { code: 0 }; }
-    return dailyCampaign(checked.has(secret.userId));
-  } };
-}
-
-test("签到接口：查询无副作用，领取要求令牌、同源 JSON 和正确方法", async (t) => {
-  const signing = claimFixture();
-  const f = await fixture(t, { api: { post: signing.post } });
-  assert.equal((await (await f.call("/api/checkin")).json()).state, "idle");
-  assert.equal((await (await f.call("/api/overview")).json()).accounts[0].checkin.outcome, "unchecked");
-  assert.equal((await f.call("/api/accounts/a%3A0/checkin")).status, 405);
-  const wrongMethod = await f.call("/api/checkin", { method: "DELETE" });
-  assert.equal(wrongMethod.status, 405);
-  assert.equal(wrongMethod.headers.get("allow"), "GET, POST");
-  assert.equal((await f.call("/api/checkin", { method: "POST", headers: { "X-Doubao-Admin": "wrong" } })).status, 403);
-  assert.equal((await f.call("/api/accounts/a%3A0/checkin", { method: "POST", headers: { Origin: "https://evil.example" } })).status, 403);
-  assert.equal((await f.call("/api/checkin", { method: "POST", headers: { "Content-Type": "text/plain" } })).status, 415);
-  assert.equal((await f.call("/api/checkin", { method: "POST", body: "{" })).status, 400);
-  assert.equal((await f.call("/api/accounts/missing/checkin", { method: "POST" })).status, 404);
-  await f.store.update("a:0", { enabled: false });
-  await f.store.update("b:0", { enabled: false });
-  assert.equal((await f.call("/api/checkin", { method: "POST" })).status, 409);
-  assert.deepEqual(signing.queries, []);
-});
-
-test("单账号签到：后台领取并回查，刷新公开额度，重复操作只查询", async (t) => {
-  const signing = claimFixture();
-  let usageCalls = 0;
-  const f = await fixture(t, { api: { post: signing.post, usage: async () => {
-    usageCalls++;
-    return { plan: "个人版", windows: [{ name: "积分", amount: 20, limit: 220, unit: "额度", cookieHeader: "PRIVATE_USAGE_COOKIE" }] };
-  } } });
-  const response = await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  assert.equal(response.status, 202);
-  const started = await response.json();
-  assert.equal(started.kind, "single");
-  assert.equal(started.total, 1);
-  const status = await waitCheckin(f);
-  assert.equal(status.state, "completed");
-  assert.equal(status.completed, 1);
-  assert.equal(status.results[0].outcome, "claimed");
-  assert.equal(status.results[0].credit, 200);
-  assert.equal(status.results[0].streak, 3);
-  assert.equal(status.counts.claimed, 1);
-  assert.equal(usageCalls, 1);
+test("管理台：移除签到后旧接口不可用，概览不含签到状态且不请求上游领取", async (t) => {
+  const posts = [];
+  const f = await fixture(t, { api: { post: async (...args) => { posts.push(args); throw Error("Unexpected upstream claim"); } } });
+  const before = await readFile(join(f.root, "accounts.json"), "utf8");
+  for (const path of ["/api/checkin", "/api/accounts/a%3A0/checkin"])
+    for (const method of ["GET", "POST"]) assert.equal((await f.call(path, { method })).status, 404);
   const overview = await (await f.call("/api/overview")).json();
-  assert.equal(overview.accounts[0].checkin.outcome, "claimed");
-  assert.equal(overview.accounts[0].check.usage.windows[0].limit, 220);
-  assert.equal(overview.accounts[1].checkin.outcome, "unchecked");
-  assert(!JSON.stringify([status, overview]).includes("PRIVATE_"));
-  await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  const repeated = await waitCheckin(f);
-  assert.equal(repeated.results[0].outcome, "done");
-  assert.equal(repeated.results[0].credit, undefined);
-  assert.deepEqual(signing.claims, ["a"]);
-  assert.equal(usageCalls, 2);
-});
-
-test("批量签到：只选启用账号，单个会话失败不阻止后续领取且不泄露凭据", async (t) => {
-  const signing = claimFixture();
-  const f = await fixture(t, { api: { post: async (secret, path, ...rest) => {
-    if (secret.userId === "a") throw fail(401, "PRIVATE_EXCEPTION_COOKIE");
-    return signing.post(secret, path, ...rest);
-  } } });
-  await f.store.save(auth("c"));
-  await f.store.update("b:0", { enabled: false });
-  const response = await f.call("/api/checkin", { method: "POST" });
-  assert.equal(response.status, 202);
-  assert.equal((await response.json()).total, 2);
-  const status = await waitCheckin(f);
-  assert.equal(status.completed, 2);
-  assert.equal(status.results[0].outcome, "expired");
-  assert.equal(status.results[1].outcome, "claimed");
-  assert.equal(status.counts.expired, 1);
-  assert.equal(status.counts.claimed, 1);
-  assert.deepEqual(signing.claims, ["c"]);
-  assert(!JSON.stringify(status).includes("PRIVATE_"));
-  assert.equal((await (await f.call("/api/overview")).json()).accounts.find((account) => account.uid === "b:0").checkin.outcome, "unchecked");
-});
-
-test("批量签到：排队后停用或移除的账号跳过，重入拒绝，停用账号仍可单独签到", async (t) => {
-  const signing = claimFixture();
-  let entered = false, release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const f = await fixture(t, { api: { post: async (secret, path, ...rest) => {
-    if (secret.userId === "a" && path.endsWith("/launch")) { entered = true; await gate; }
-    return signing.post(secret, path, ...rest);
-  } } });
-  t.after(release);
-  await f.store.save(auth("c"));
-  const response = await f.call("/api/checkin", { method: "POST" });
-  assert.equal(response.status, 202);
-  await waitUntil(() => entered);
-  const progress = await (await f.call("/api/checkin")).json();
-  assert.equal(progress.active, true);
-  assert.equal(progress.completed, 0);
-  assert.equal(progress.current.uid, "a:0");
-  assert.equal((await f.call("/api/checkin", { method: "POST" })).status, 409);
-  assert.equal((await f.call("/api/accounts/b%3A0/checkin", { method: "POST" })).status, 409);
-  await f.store.update("b:0", { enabled: false });
-  await f.store.remove("c:0");
-  release();
-  const status = await waitCheckin(f);
-  assert.equal(status.completed, 3);
-  assert.equal(status.results[0].outcome, "claimed");
-  assert.equal(status.results[1].outcome, "skipped");
-  assert.equal(status.results[2].outcome, "skipped");
-  assert.deepEqual(signing.claims, ["a"]);
-  await f.call("/api/accounts/b%3A0/checkin", { method: "POST" });
-  assert.equal((await waitCheckin(f)).results[0].outcome, "claimed");
-  assert.deepEqual(signing.claims, ["a", "b"]);
-  assert.equal((await f.store.list()).find((account) => account.uid === "b:0").enabled, false);
-});
-
-test("签到任务：启动响应关闭后后台继续，状态查询不会再次提交", async (t) => {
-  const signing = claimFixture();
-  let entered = false, release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const f = await fixture(t, { api: { post: async (secret, path, ...rest) => {
-    if (path.endsWith("/launch")) { entered = true; await gate; }
-    return signing.post(secret, path, ...rest);
-  } } });
-  t.after(release);
-  const controller = new AbortController();
-  const response = await f.call("/api/accounts/a%3A0/checkin", { method: "POST", signal: controller.signal });
-  assert.equal(response.status, 202);
-  await response.json();
-  await waitUntil(() => entered);
-  controller.abort();
-  release();
-  assert.equal((await waitCheckin(f)).results[0].outcome, "claimed");
-  const before = signing.queries.length;
-  await f.call("/api/checkin");
-  await f.call("/api/overview");
-  assert.equal(signing.queries.length, before);
-  assert.deepEqual(signing.claims, ["a"]);
-});
-
-test("签到任务：上游未确认时保留提交记录，重复点击不再领取", async (t) => {
-  let claims = 0;
-  const f = await fixture(t, { api: { post: async (_secret, path) => {
-    if (path.endsWith("/launch")) return launchCampaign;
-    if (path.endsWith("/claim/")) { claims++; throw Error("PRIVATE_NETWORK_COOKIE"); }
-    return dailyCampaign(false);
-  } } });
-  await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  assert.equal((await waitCheckin(f)).results[0].outcome, "failed");
-  await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  const repeated = await waitCheckin(f);
-  assert.equal(repeated.results[0].outcome, "failed");
-  assert.equal(claims, 1);
-  assert(!JSON.stringify(repeated).includes("PRIVATE_"));
-});
-
-test("签到任务：已确认领取不会因额度查询失败变成领取失败", async (t) => {
-  const signing = claimFixture();
-  const f = await fixture(t, { api: { post: signing.post, usage: async () => { throw Error("PRIVATE_USAGE_COOKIE"); } } });
-  await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  const status = await waitCheckin(f);
-  assert.equal(status.results[0].outcome, "claimed");
-  assert.equal(status.results[0].credit, 200);
-  assert.match(status.results[0].usageError, /额度/);
-  const overview = await (await f.call("/api/overview")).json();
-  assert.equal(overview.accounts[0].check.state, "ok");
-  assert.equal(overview.accounts[0].check.usage, undefined);
-  assert.match(overview.accounts[0].check.usageError, /额度/);
-  assert(!JSON.stringify([status, overview]).includes("PRIVATE_"));
-});
-
-test("签到额度：签到前的旧检测响应迟到也不会覆盖领取后的额度", async (t) => {
-  const signing = claimFixture();
-  let usageCalls = 0, entered = false, release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const f = await fixture(t, { api: { post: signing.post, usage: async () => {
-    if (++usageCalls === 1) { entered = true; await gate; return { windows: [{ name: "积分", amount: 10, limit: 20 }] }; }
-    return { windows: [{ name: "积分", amount: 10, limit: 220 }] };
-  } } });
-  t.after(release);
-  const detection = f.call("/api/accounts/a%3A0/check", { method: "POST" });
-  await waitUntil(() => entered);
-  await f.call("/api/accounts/a%3A0/checkin", { method: "POST" });
-  assert.equal((await waitCheckin(f)).results[0].outcome, "claimed");
-  release();
-  assert.equal((await (await detection).json()).usage.windows[0].limit, 220);
-  assert.equal((await (await f.call("/api/overview")).json()).accounts[0].check.usage.windows[0].limit, 220);
-});
-
-test("签到任务：单账号超时有结果，批量继续处理后续账号", async (t) => {
-  const signing = claimFixture();
-  let timedOut = false;
-  const f = await fixture(t, { config: { timeoutMs: 250 }, api: { post: async (secret, path, payload, { signal }) => {
-    if (secret.userId !== "a") return signing.post(secret, path, payload, { signal });
-    return new Promise((_resolve, reject) => {
-      const abort = () => { timedOut = true; reject(signal.reason); };
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) abort();
-    });
-  } } });
-  await f.call("/api/checkin", { method: "POST" });
-  const status = await waitCheckin(f);
-  assert.equal(timedOut, true);
-  assert.equal(status.results[0].outcome, "failed");
-  assert.match(status.results[0].message, /超时/);
-  assert.equal(status.results[1].outcome, "claimed");
-  assert.deepEqual(signing.claims, ["b"]);
-});
-
-test("签到任务：服务关闭取消上游请求，不执行后续账号", async (t) => {
-  const queries = [];
-  let receivedSignal;
-  const f = await fixture(t, { api: { post: async (secret, _path, _payload, { signal }) => {
-    queries.push(secret.userId);
-    receivedSignal = signal;
-    return new Promise((_resolve, reject) => {
-      const abort = () => reject(signal.reason);
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) abort();
-    });
-  } } });
-  await f.call("/api/checkin", { method: "POST" });
-  await waitUntil(() => receivedSignal);
-  await f.admin.close();
-  assert.equal(receivedSignal.aborted, true);
-  assert.deepEqual(queries, ["a"]);
-  assert.equal((await f.store.list()).length, 2);
+  assert.equal(Object.hasOwn(overview, "checkin"), false);
+  assert(overview.accounts.every(account => !Object.hasOwn(account, "checkin")));
+  assert.equal((await f.call("/api/accounts/a%3A0/check", { method: "POST" })).status, 200);
+  assert.deepEqual(posts, []);
+  assert.equal(await readFile(join(f.root, "accounts.json"), "utf8"), before);
 });
 
 test("管理台：接入配置默认不包含 API Key，密钥需要同源显式操作", async (t) => {

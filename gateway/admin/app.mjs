@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { node, icon, button, iconButton, searchField, pageHeading, emptyState, accountRow, statusPill, statusMeta, checkinBlock, quotaBlock, formatDate, avatarTone } from "./ui.mjs";
+import { node, icon, button, iconButton, searchField, pageHeading, emptyState, accountRow, statusPill, statusMeta, quotaBlock, formatDate, avatarTone } from "./ui.mjs";
 
 const content = document.getElementById("content");
 const state = {
@@ -7,9 +7,8 @@ const state = {
   filter: "all", search: "", token: "", checking: new Set(), checkingAll: false,
   modelUid: "", models: [], modelSearch: "", modelLoading: false, modelError: "",
   settings: null, apiKey: "", syncError: "", drawerUid: null, clientProtocol: "chat",
-  checkin: { state: "idle", active: false, results: [] }, checkinStarting: false, checkinExpanded: true,
 };
-let loginDialog, drawer, loginTimer, checkinTimer, toastTimer, refreshTask, modelRequest = 0, loginMode = "form", drawerDraft = "";
+let loginDialog, drawer, loginTimer, toastTimer, refreshTask, modelRequest = 0, loginMode = "form", drawerDraft = "";
 const names = { accounts: "账号池", models: "模型目录", settings: "接入配置" };
 
 async function session() {
@@ -45,6 +44,12 @@ function banners() {
   const result = [];
   if (state.syncError) result.push(node("div", { class: "info-banner error", role: "alert" }, icon("alert"), state.syncError, button("重试", { kind: "quiet", onClick: () => void refresh().catch((error) => toast(error.message, true)) })));
   if (state.login.active) result.push(node("div", { class: "info-banner" }, icon("browser"), "有一个账号正在登录，完成后会自动加入账号池。", button("查看登录", { kind: "quiet", onClick: openLogin })));
+  for (const [uid, verification] of Object.entries(state.gateway.verification?.accounts || {})) {
+    if (verification.state !== "manual" || !Number.isSafeInteger(verification.expiresAt)) continue;
+    const account = state.accounts.find((item) => item.uid === uid);
+    result.push(node("div", { class: "info-banner warning", role: "status", "aria-live": "polite" }, icon("browser"),
+      `${account?.name || "当前账号"}需要人工验证，请在弹出的豆包窗口完成验证码。通过后原请求会自动继续。`));
+  }
   if (state.gateway.fixedAccountId) result.push(node("div", { class: "info-banner warning" }, icon("alert"), node("span", {}, "网关已固定使用账号 ", node("span", { class: "mono" }, state.gateway.fixedAccountId), "，固定配置优先于默认账号。")));
   return result;
 }
@@ -55,18 +60,16 @@ async function refresh({ live = false } = {}) {
       const result = await request("/api/overview");
       const previousDrawer = state.accounts.find((account) => account.uid === state.drawerUid);
       const previousError = state.syncError;
-      const wasSigning = state.checkin.active;
       state.accounts = result.accounts;
       state.gateway = result.gateway;
       state.syncError = "";
       acceptLogin(result.login);
-      acceptCheckin(result.checkin);
       connectionState();
       if (live && !previousError) {
-        if (state.view === "accounts") { renderCheckinButton(); renderCheckinPanel(); renderAccountRows(); }
+        if (state.view === "accounts") renderAccountRows();
       } else renderView();
       const currentDrawer = state.accounts.find((account) => account.uid === state.drawerUid);
-      if (drawer?.open && (wasSigning !== state.checkin.active || JSON.stringify([previousDrawer?.check, previousDrawer?.checkin]) !== JSON.stringify([currentDrawer?.check, currentDrawer?.checkin]))) renderDrawerStatus();
+      if (drawer?.open && (JSON.stringify(previousDrawer?.check) !== JSON.stringify(currentDrawer?.check))) renderDrawerStatus();
     } catch (error) {
       state.syncError = "管理台连接中断，请检查服务后重试。";
       renderView();
@@ -95,97 +98,31 @@ function renderAccounts() {
   const defaultAccount = state.accounts.find((account) => account.default);
   const checkButton = button(state.checkingAll ? "正在检测" : "刷新状态", { symbol: "refresh", className: state.checkingAll ? "spinner" : "", disabled: state.checkingAll || !enabled, onClick: () => void checkAll() });
   content.replaceChildren(
-    pageHeading("账号池", "管理接入账号、登录会话与使用额度。", poolCheckinButton(), checkButton, button("添加账号", { kind: "primary", symbol: "plus", onClick: openLogin, disabled: state.accounts.length >= 64 })),
+    pageHeading("账号池", "管理接入账号、登录会话与使用额度。", checkButton, button("添加账号", { kind: "primary", symbol: "plus", onClick: openLogin, disabled: state.accounts.length >= 64 })),
     ...banners(),
     node("section", { class: "metrics", "aria-label": "账号池概览" }, metric("账号总数", state.accounts.length, "最多接入 64 个账号", { symbol: "users", tone: "indigo" }), metric("已启用", enabled, "可设为网关服务账号", { accent: true, symbol: "shield", tone: "emerald" }), metric("已停用", state.accounts.length - enabled, "暂停用于网关请求", { symbol: "layers", tone: "slate" }), metric("默认账号", defaultAccount?.name || "未设置", defaultAccount?.uid || "添加或启用一个账号", { account: true, symbol: "star", tone: "amber" })),
-    node("div", { id: "checkin-slot", hidden: !state.checkin.id }),
     node("section", { class: "pool-panel", "aria-label": "账号列表" },
       node("div", { class: "pool-toolbar" }, node("div", { class: "tabs", role: "tablist", "aria-label": "账号状态筛选" }, [["all", "全部账号", state.accounts.length], ["enabled", "已启用", enabled], ["disabled", "已停用", state.accounts.length - enabled]].map(([value, label, count]) => node("button", { type: "button", class: `tab${state.filter === value ? " active" : ""}`, role: "tab", "aria-selected": String(state.filter === value), onClick: () => { state.filter = value; renderAccounts(); } }, label, node("span", { class: "tab-count" }, count)))), searchField("搜索账号名称或 UID", state.search, (event) => { state.search = event.target.value; renderAccountRows(); })),
-      node("div", { class: "table-scroll", id: "accounts-table-wrap" }, node("table", { class: "accounts-table", "aria-label": "账号池" }, node("thead", {}, node("tr", {}, ["账号", "状态", "使用额度", "今日签到", "最近更新", "操作"].map((title) => node("th", { scope: "col" }, title)))), node("tbody", { id: "account-rows" }))),
+      node("div", { class: "table-scroll", id: "accounts-table-wrap" }, node("table", { class: "accounts-table", "aria-label": "账号池" }, node("thead", {}, node("tr", {}, ["账号", "状态", "使用额度", "最近更新", "操作"].map((title) => node("th", { scope: "col" }, title)))), node("tbody", { id: "account-rows" }))),
       node("div", { id: "account-empty" }),
       node("p", { class: "mobile-hint", id: "table-hint" }, "左右滑动查看完整账号信息"),
       node("div", { class: "pool-footer" }, node("span", { id: "account-count" }), node("span", { class: "sync-state" }, node("span", { class: "status-dot" }), "每 15 秒同步账号池")),
     ),
   );
   renderAccountRows();
-  renderCheckinPanel();
 }
 function renderAccountRows() {
   const query = state.search.trim().toLowerCase();
   const accounts = state.accounts.filter((account) => (state.filter === "all" || account.enabled === (state.filter === "enabled")) && (!query || `${account.name} ${account.uid}`.toLowerCase().includes(query)));
   const table = document.getElementById("account-rows");
   if (!table) return;
-  table.replaceChildren(...accounts.map((account) => accountRow(account, { manage: openDrawer, check: checkAccount, checkin: startCheckin, use: useAccount }, state.checking.has(account.uid), state.checkinStarting || state.checkin.active)));
+  table.replaceChildren(...accounts.map((account) => accountRow(account, { manage: openDrawer, check: checkAccount, use: useAccount }, state.checking.has(account.uid))));
   document.getElementById("accounts-table-wrap").hidden = !accounts.length;
   document.getElementById("table-hint").hidden = !accounts.length;
   const empty = document.getElementById("account-empty");
   empty.replaceChildren();
   if (!accounts.length) empty.append(state.accounts.length ? emptyState("没有匹配的账号", "试试其他名称、UID 或账号状态。", button("重置筛选", { onClick: () => { state.search = ""; state.filter = "all"; renderAccounts(); } }), "search") : emptyState("接入你的第一个账号", "通过独立浏览器登录豆包工作，完成确认后即可在这里管理账号。", button("添加账号", { kind: "primary", symbol: "plus", onClick: openLogin })));
   document.getElementById("account-count").textContent = accounts.length === state.accounts.length ? `共 ${state.accounts.length} 个账号` : `显示 ${accounts.length} / ${state.accounts.length} 个账号`;
-}
-function poolCheckinButton() {
-  return button(state.checkinStarting ? "正在发起" : state.checkin.active ? "签到进行中" : "一键签到", {
-    id: "pool-checkin", symbol: "gift", disabled: state.checkinStarting || state.checkin.active || !state.accounts.some((account) => account.enabled),
-    title: "为所有已启用账号查询签到并领取今日奖励", onClick: () => void startCheckin(),
-  });
-}
-function renderCheckinButton() { document.getElementById("pool-checkin")?.replaceWith(poolCheckinButton()); }
-function checkinSummary(job) {
-  const claimed = job.counts?.claimed || 0, done = job.counts?.done || 0;
-  return `新领取 ${claimed} · 已签到 ${done} · 未领取 ${Math.max(0, job.completed - claimed - done)}`;
-}
-function renderCheckinPanel() {
-  const slot = document.getElementById("checkin-slot");
-  if (!slot) return;
-  const job = state.checkin;
-  slot.hidden = !job.id;
-  if (!job.id) { slot.replaceChildren(); return; }
-  const heading = job.kind === "single" ? "账号签到" : "批量签到";
-  const description = job.active ? `正在处理 ${job.current?.name || "签到队列"}` : `${job.completed} 个账号处理完毕`;
-  slot.replaceChildren(node("section", { class: "panel checkin-panel", "aria-label": "签到结果" },
-    node("div", { class: "checkin-heading" }, node("div", { class: "checkin-title" }, node("span", { class: "checkin-icon" }, icon("gift", 20)), node("div", {}, node("h2", {}, heading), node("p", {}, `${job.day} · 北京时间`))), statusPill(job.active ? "进行中" : job.state === "cancelled" ? "已停止" : "已完成", job.active ? "accent" : "neutral")),
-    node("div", { class: "checkin-progress-line", role: "status", "aria-live": "polite" }, node("span", {}, description), node("strong", {}, `${job.completed} / ${job.total}`)),
-    node("progress", { class: "quota-progress checkin-progress", max: job.total || 1, value: job.completed, "aria-label": "签到进度" }),
-    node("p", { class: "checkin-summary" }, checkinSummary(job)),
-    node("details", { class: "checkin-details", open: state.checkinExpanded, onToggle: (event) => { state.checkinExpanded = event.target.open; } }, node("summary", {}, "逐项签到结果"),
-      node("ul", { class: "checkin-results" }, (job.results || []).map((result) => node("li", {}, node("div", { class: "checkin-result-top" }, node("strong", { title: result.name }, result.name), checkinBlock(result, true)), node("p", {}, result.usageError || result.message)))),
-    ),
-  ));
-}
-async function startCheckin(account) {
-  if (state.checkinStarting || state.checkin.active) return;
-  state.checkinStarting = true;
-  state.checkinExpanded = true;
-  renderCheckinButton();
-  if (state.view === "accounts") renderAccountRows();
-  if (drawer?.open) renderDrawerStatus();
-  try {
-    acceptCheckin(await request(account ? accountPath(account.uid, "checkin") : "/api/checkin", { method: "POST" }));
-    await refresh({ live: true });
-  } catch (error) { toast(error.message, true); }
-  finally {
-    state.checkinStarting = false;
-    renderCheckinButton();
-    renderCheckinPanel();
-    if (state.view === "accounts") renderAccountRows();
-    if (drawer?.open) renderDrawerStatus();
-  }
-}
-function acceptCheckin(job) {
-  if (!job) return;
-  const previous = state.checkin;
-  state.checkin = job;
-  if (previous.active && previous.id === job.id && !job.active) toast(`签到${job.state === "cancelled" ? "已停止" : "已完成"}：${checkinSummary(job)}`);
-  if (!job.active) { clearTimeout(checkinTimer); checkinTimer = null; }
-  else scheduleCheckin();
-}
-function scheduleCheckin() {
-  if (checkinTimer || !state.checkin.active) return;
-  checkinTimer = setTimeout(async () => {
-    checkinTimer = null;
-    try { await refresh({ live: true }); } catch { /* The connection banner offers a retry; keep observing the existing job. */ }
-    scheduleCheckin();
-  }, 1200);
 }
 async function checkAccount(account, { quiet = false } = {}) {
   if (state.checking.has(account.uid)) return false;
@@ -273,20 +210,13 @@ function renderDrawer() {
     node("div", { class: "drawer-identity" }, node("span", { class: `account-avatar ${avatarTone(account.uid || account.name)}` }, (account.name || "豆").slice(0, 1)), node("div", {}, node("strong", {}, account.name), node("small", { class: "mono muted" }, account.uid))),
     form,
     node("div", { class: "toggle-line" }, node("div", {}, node("strong", {}, "启用账号"), node("small", {}, "停用后不再用于后续网关请求")), toggle),
-    drawerSessionSection(account), drawerCheckinSection(account), drawerQuotaSection(account),
+    drawerSessionSection(account), drawerQuotaSection(account),
     node("section", { class: "drawer-section drawer-actions" }, button(account.default ? "当前默认账号" : "设为默认账号", { symbol: "star", disabled: account.default || !account.enabled, onClick: () => void useAccount(account) }), button("重新登录 / 更新会话", { symbol: "browser", onClick: () => { drawer.close(); openLogin(); } }), button("移除账号", { kind: "danger", symbol: "trash", onClick: () => removeAccount(account) })),
   ));
 }
 function drawerSessionSection(account) {
   const [label, kind] = statusMeta[account.check.state] || statusMeta.unchecked;
   return node("section", { class: "drawer-section", id: "drawer-session" }, node("h3", {}, "登录会话"), node("div", { class: "drawer-status-line" }, statusPill(label, kind), button("检测", { kind: "quiet", symbol: "refresh", disabled: state.checking.has(account.uid), onClick: () => void checkAccount(account) })), account.check.message && node("p", { class: "drawer-message" }, account.check.message), node("p", { class: "field-hint" }, account.check.checkedAt ? `最近检测：${formatDate(account.check.checkedAt, true)}` : "尚未检测。点击检测以核验会话并查询额度。"));
-}
-function drawerCheckinSection(account) {
-  const pending = ["queued", "running"].includes(account.checkin?.outcome);
-  return node("section", { class: "drawer-section", id: "drawer-checkin" },
-    node("div", { class: "drawer-status-line" }, node("h3", {}, "每日签到"), button(pending ? "签到进行中" : "签到领取", { kind: "quiet", symbol: "gift", disabled: state.checkinStarting || state.checkin.active, onClick: () => void startCheckin(account) })),
-    checkinBlock(account.checkin), node("p", { class: "field-hint" }, "一键签到只处理已启用账号；此按钮可为当前账号单独签到。"),
-  );
 }
 function drawerQuotaSection(account) {
   return node("section", { class: "drawer-section", id: "drawer-quota" }, node("h3", {}, "使用额度", account.check.usage?.plan && node("small", { class: "muted" }, ` · ${account.check.usage.plan}`)), quotaBlock(account.check));
@@ -295,7 +225,6 @@ function renderDrawerStatus() {
   const account = state.accounts.find((item) => item.uid === state.drawerUid);
   if (!account) { drawer?.close(); return; }
   drawer?.querySelector("#drawer-session")?.replaceWith(drawerSessionSection(account));
-  drawer?.querySelector("#drawer-checkin")?.replaceWith(drawerCheckinSection(account));
   drawer?.querySelector("#drawer-quota")?.replaceWith(drawerQuotaSection(account));
 }
 function removeAccount(account) {
@@ -340,8 +269,8 @@ function renderLogin() {
   const login = state.login;
   const success = login.state === "success";
   const failed = ["error", "cancelled", "expired"].includes(login.state);
-  const titles = { starting: "正在打开独立浏览器", waiting: "等待你完成登录", awaiting_confirmation: "登录完成，请确认接入", importing: "正在核验账号", success: "账号已接入", cancelled: "登录已取消", expired: "登录已超时", error: "登录需要检查" };
-  const status = node("div", { class: `login-status login-${login.state}${failed ? " error" : ""}` }, icon(success ? "check" : failed ? "alert" : "browser", 23), node("div", {}, node("strong", {}, titles[login.state] || "正在读取登录状态"), node("p", {}, login.message || "请在新打开的独立浏览器中完成扫码或验证码登录。")));
+  const titles = { starting: "正在打开独立浏览器", waiting: "等待你完成登录", verifying: "正在核验官网验证", awaiting_confirmation: "登录完成，请确认接入", importing: "正在核验账号", success: "账号已接入", cancelled: "登录已取消", expired: "登录已超时", error: "登录需要检查" };
+  const status = node("div", { class: `login-status login-${login.state}${failed ? " error" : ""}` }, icon(success ? "check" : failed ? "alert" : "browser", 23), node("div", {}, node("strong", {}, login.captcha?.state === "manual" ? "等待人工验证" : titles[login.state] || "正在读取登录状态"), node("p", {}, login.message || "请在新打开的独立浏览器中完成扫码或验证码登录。")));
   const confirm = button(login.state === "importing" ? "正在核验" : "确认接入", { kind: "primary", disabled: login.state !== "awaiting_confirmation", onClick: async () => {
     confirm.disabled = true;
     try { acceptLogin(await request("/api/login/confirm", { method: "POST" })); scheduleLogin(); }
@@ -451,6 +380,8 @@ function renderSettings() {
     ["管理台端口", config.adminPort], ["支持协议", protocols.map((item) => item.name).join(" / ")], ["账号策略", config.fixedAccountId ? "固定指定账号" : "默认账号"],
     ["请求超时", `${config.timeoutMs / 1000} 秒`], ["单账号并发", `${config.maxConcurrency} 个对话`], ["实验性工具桥", config.promptTools ? "已启用" : "已关闭"],
     ["上游历史", config.hideHistory ? "会话完成后自动隐藏" : "保留会话记录"],
+    ["人机验证", config.captcha?.manualFallback === false ? "已关闭" : "检测到后立即弹窗 · 人工完成"],
+    ["人工验证等待", `最多 ${(config.captcha?.manualTimeoutMs || 300000) / 60000} 分钟`],
     ...(config.hideHistory && config.historyCleanup ? [["已隐藏会话", config.historyCleanup.hidden], ["隐藏未完成", config.historyCleanup.failed]] : []),
     ...(config.fixedAccountId ? [["固定账号 UID", config.fixedAccountId]] : []), ["数据目录", config.dataDir],
   ];

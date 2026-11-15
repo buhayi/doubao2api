@@ -7,6 +7,7 @@ class Decoder {
     this.done = false;
     this.blocks = new Map();
     this.thinking = new Set();
+    this.deltaTemplate = null;
     this.size = 0;
     this.onConversation = onConversation;
   }
@@ -15,7 +16,7 @@ class Decoder {
     for (const b of Array.isArray(rows) ? rows : []) {
       if (Number(b?.block_type) !== 10000) continue;
       const t = b?.content?.text_block;
-      if (typeof t?.text !== "string") continue;
+      if (!t || typeof t !== "object") continue;
       const id = String(b.block_id || "default"),
         tagged = [t.icon_url, t.icon_url_dark].some(
           (s) =>
@@ -27,6 +28,7 @@ class Decoder {
         Object.hasOwn(t, "icon_url_dark")
       )
         this.thinking.delete(id);
+      if (typeof t.text !== "string") continue;
       const reasoning = tagged || this.thinking.has(id),
         key = (reasoning ? "r:" : "t:") + id,
         prior = this.blocks.get(key) || "";
@@ -73,6 +75,14 @@ class Decoder {
       return this.blocksOf(v?.content?.content_block, true);
     if (event === "FULL_MSG_NOTIFY" && Number(v?.message?.user_type) === 2)
       return this.blocksOf(v.message.content_block, false);
+    if (event === "CHUNK_DELTA" && this.deltaTemplate) {
+      // Compact deltas inherit the preceding single-block STREAM_CHUNK.
+      // Preserve its block ID and content kind for snapshots and reasoning.
+      const key = Object.keys(this.deltaTemplate.content || {})[0];
+      return key ? this.blocksOf([
+        { ...this.deltaTemplate, content: { [key]: v } },
+      ], true) : [];
+    }
     if (event === "CHUNK_DELTA" && typeof v?.text === "string")
       return this.blocksOf(
         [
@@ -85,8 +95,13 @@ class Decoder {
         true,
       );
     if (event === "STREAM_CHUNK") {
+      const patches = v?.patch_op || [];
+      const rows = patches[0]?.patch_value?.content_block;
+      if (patches.length === 1 && Number(patches[0].patch_object) === 1 &&
+        Array.isArray(rows) && rows.length === 1)
+        this.deltaTemplate = rows[0];
       const result = [];
-      for (const p of v?.patch_op || [])
+      for (const p of patches)
         if (Number(p.patch_object) === 1)
           result.push(
             ...this.blocksOf(
