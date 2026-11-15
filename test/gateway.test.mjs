@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { request } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { createGateway } from "../gateway/server.mjs";
-import { fail } from "../protocol.mjs";
+import { fail, vendorError } from "../protocol.mjs";
 
 const KEY = "sk-fixture-0123456789abcdef";
 const model = { id: "flash", name: "测试模型", agentMode: 2, modeId: "3", deepThink: 4, extra: {} };
@@ -32,49 +32,42 @@ async function fixture(t, options = {}) {
   return { gateway, api, calls, url, call, chat };
 }
 
-test("网关：人工验证使用独立等待时间，通过后恢复普通请求超时", async (t) => {
-  const f = await fixture(t, { timeoutMs: 100, captchaManualTimeoutMs: 1000, api: {
-    post: async (_secret, _path, _payload, { signal, onVerification }) => {
-      onVerification({ state: "manual", expiresAt: Date.now()+1000 });
-      await delay(250, undefined, { signal });
-      onVerification({ state: "verifying" });
-      await delay(20, undefined, { signal });
-      return upstream("人工验证后继续");
-    },
-  } });
-  const response = await f.chat();
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).choices[0].message.content, "人工验证后继续");
-
-  const stalled = await fixture(t, { timeoutMs: 100, captchaManualTimeoutMs: 1000, api: {
-    post: async (_secret, _path, _payload, { signal, onVerification }) => {
-      onVerification({ state: "manual", expiresAt: Date.now()+1000 });
-      await delay(250, undefined, { signal });
-      onVerification({ state: "verifying" });
-      await delay(300, undefined, { signal });
-      return upstream();
-    },
-  } });
-  const timedOut = await stalled.chat();
-  assert.equal(timedOut.status, 504);
-  assert.equal((await timedOut.json()).error.code, "request_timeout");
+test("网关：HTTP 与 SSE 验证拒绝直接返回错误，不恢复或重发", async (t) => {
+  for (const transport of ["http", "sse"]) await t.test(transport, async (t) => {
+    let posts = 0, recoveries = 0;
+    const errorBody = { code: 710022004, extra: { decision: { type: "verify", challenge: "PRIVATE_CHALLENGE" } } };
+    const f = await fixture(t, { api: {
+      post: async (_secret, _path, _payload, options) => {
+        posts++;
+        assert.equal(options.onVerification, undefined);
+        if (transport === "http") throw vendorError(429, errorBody);
+        return new Response(frame("SSE_ERROR", errorBody));
+      },
+      recover: async () => { recoveries++; throw Error("不能恢复验证请求"); },
+    } });
+    const response = await f.chat();
+    assert.equal(response.status, 429);
+    const result = await response.json();
+    assert.equal(result.error.code, "verification_required");
+    assert(!JSON.stringify(result).includes("PRIVATE_CHALLENGE"));
+    assert.equal(posts, 1);
+    assert.equal(recoveries, 0);
+  });
 });
 
-test("网关：重复人工状态不会延长等待上限", async (t) => {
-  const f = await fixture(t, { timeoutMs: 100, captchaManualTimeoutMs: 80, api: {
+test("网关：移除人工等待后保留普通请求超时", async (t) => {
+  const f = await fixture(t, { timeoutMs: 100, captchaManualTimeoutMs: 10000, api: {
     post: async (_secret, _path, _payload, { signal, onVerification }) => {
-      const notify = () => onVerification({ state: "manual", expiresAt: Date.now()+10_000 });
-      notify();
-      const timer = setInterval(notify, 10);
-      try { await delay(1000, undefined, { signal }); return upstream(); }
-      finally { clearInterval(timer); }
+      assert.equal(onVerification, undefined);
+      await delay(1000, undefined, { signal });
+      return upstream();
     },
   } });
   const response = await f.chat();
   assert.equal(response.status, 504);
   const error = (await response.json()).error;
   assert.equal(error.code, "request_timeout");
-  assert.match(error.message, /人工验证等待已超时/);
+  assert(!error.message.includes("人工验证"));
 });
 
 test("网关：健康检查无敏感信息；所有 API 必须鉴权且不访问上游", async (t) => {

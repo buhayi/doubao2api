@@ -33,7 +33,7 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
     if (!["http:", "https:"].includes(url.protocol) || url.origin !== origin)
       throw Error("DW_CORS_ORIGINS 只接受不含路径的 HTTP(S) 来源地址。");
   }
-  for (const name of ["DW_PROMPT_TOOLS", "DW_HIDE_HISTORY", "DW_AUTO_CAPTCHA", "DW_CAPTCHA_MANUAL_FALLBACK"])
+  for (const name of ["DW_PROMPT_TOOLS", "DW_HIDE_HISTORY"])
     if (values[name] !== undefined && !["true", "false"].includes(values[name]))
       throw Error(`${name} 必须为 true 或 false。`);
   const dataDir = resolve(cwd, values.DW_DATA_DIR || "data");
@@ -43,12 +43,6 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
   const port = integer(values.DW_PORT, 8787, 1, 65535, "DW_PORT");
   const adminPort = integer(values.DW_ADMIN_PORT, 8786, 0, 65535, "DW_ADMIN_PORT");
   if (adminPort && adminPort === port) throw Error("DW_ADMIN_PORT 不能与 DW_PORT 使用同一个端口。");
-  if (values.DW_CAPTCHA_PYTHON && (!isAbsolute(values.DW_CAPTCHA_PYTHON) || /[\x00-\x1f]/.test(values.DW_CAPTCHA_PYTHON)))
-    throw Error("DW_CAPTCHA_PYTHON 必须是 Python 可执行文件的完整路径。");
-  const captchaBrowser = values.DW_CAPTCHA_BROWSER || "auto";
-  if (!["auto", "chrome", "edge", "doubao", "chromium"].includes(captchaBrowser)) throw Error("DW_CAPTCHA_BROWSER 浏览器选项无效。");
-  const captchaTransport = values.DW_CAPTCHA_TRANSPORT || "pipe";
-  if (!["pipe", "port"].includes(captchaTransport)) throw Error("DW_CAPTCHA_TRANSPORT 必须为 pipe 或 port。");
   return {
     host,
     port,
@@ -59,15 +53,9 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
     corsOrigins,
     promptTools: values.DW_PROMPT_TOOLS !== "false",
     hideHistory: values.DW_HIDE_HISTORY !== "false",
-    // Legacy auto-recognition settings never enable actions in manual mode.
+    // Retired settings cannot re-enable CAPTCHA windows or request recovery.
     autoCaptcha: false,
-    captchaManualFallback: values.DW_CAPTCHA_MANUAL_FALLBACK !== "false",
-    captchaManualTimeoutMs: integer(values.DW_CAPTCHA_MANUAL_TIMEOUT_MS, 300000, 10000, 600000, "DW_CAPTCHA_MANUAL_TIMEOUT_MS"),
-    captchaPython: values.DW_CAPTCHA_PYTHON || undefined,
-    captchaTimeoutMs: integer(values.DW_CAPTCHA_TIMEOUT_MS, 60000, 10000, 180000, "DW_CAPTCHA_TIMEOUT_MS"),
-    captchaMaxAttempts: integer(values.DW_CAPTCHA_MAX_ATTEMPTS, 3, 1, 5, "DW_CAPTCHA_MAX_ATTEMPTS"),
-    captchaBrowser: captchaBrowser === "auto" ? undefined : captchaBrowser,
-    captchaTransport,
+    captchaManualFallback: false,
     timeoutMs: integer(values.DW_TIMEOUT_MS, 120000, 1000, 600000, "DW_TIMEOUT_MS"),
     maxConcurrency: integer(values.DW_MAX_CONCURRENCY, 3, 1, 16, "DW_MAX_CONCURRENCY"),
   };

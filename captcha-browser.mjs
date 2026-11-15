@@ -99,19 +99,6 @@ function captureWidgetImage(locate, url) {
   } catch { return null; }
 }
 
-function manualNotice() {
-  if (location.protocol !== "https:" || !["doubao.com", "www.doubao.com"].includes(location.hostname) || (location.port && location.port !== "443") || !document.body) return false;
-  if (document.getElementById("__dw_manual_verification")) return true;
-  const notice = document.createElement("div");
-  notice.id = "__dw_manual_verification";
-  notice.setAttribute("role", "status");
-  notice.setAttribute("aria-live", "assertive");
-  notice.style.cssText = "position:fixed;bottom:16px;left:16px;right:16px;z-index:2147483647;padding:14px 18px;border:1px solid #f2cc78;border-radius:12px;background:#fff8e6;color:#714b12;font:14px/1.6 system-ui,sans-serif;box-shadow:0 6px 24px #0002;pointer-events:none";
-  notice.textContent = "需要人工验证：请完成当前验证码。通过后将自动继续当前流程。";
-  document.body.appendChild(notice);
-  return true;
-}
-
 export const CAPTCHA_EXPRESSION = `(${inspectWidget.toString()})(${locateWidget.toString()})`;
 const signatureOf = (widget) => widget?.background ? createHash("sha256").update(JSON.stringify({ kind: widget.kind,
   frame: widget.frame || "main",
@@ -210,17 +197,6 @@ export function createCaptchaBrowser({ send } = {}) {
     },
     async passed() { return evaluate("(function(){if(location.protocol!=='https:'||!['doubao.com','www.doubao.com'].includes(location.hostname))return false;var s=window.__dwVerificationState;return s?s.passed===true:null})()"); },
     async outcome() { return evaluate("(function(){if(location.protocol!=='https:'||!['doubao.com','www.doubao.com'].includes(location.hostname)||(location.port&&location.port!=='443'))return {closed:true};var s=window.__dwVerificationState;return s?{passed:s.passed===true,closed:s.closed===true,failed:s.failed===true}:null})()"); },
-    async requestManual({ signal } = {}) {
-      signal?.throwIfAborted();
-      try {
-        const { windowId, bounds } = await send("Browser.getWindowForTarget");
-        if (bounds?.windowState === "minimized") await send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
-      } catch { /* Bringing the target forward also works without window metadata. */ }
-      signal?.throwIfAborted();
-      await send("Page.bringToFront");
-      signal?.throwIfAborted();
-      return evaluate(`(${manualNotice.toString()})()`);
-    },
     async refresh(signature, { signal } = {}) {
       const widget = await describe();
       if (widget?.signature !== signature || !widget.refresh || !widget.failed) return false;
@@ -230,7 +206,7 @@ export function createCaptchaBrowser({ send } = {}) {
     async show(decision) {
       // The official 4.x SDK is an initialized object. Its callbacks belong
       // inside captchaOptions, as used by the SDK's own request interceptor.
-      return evaluate(`(function(){if(location.protocol!=='https:'||!['doubao.com','www.doubao.com'].includes(location.hostname)||(location.port&&location.port!=='443'))return false;var sdk=window.TTGCaptcha;if(!sdk||typeof sdk.render!=='function')return false;window.__dwVerificationState={passed:false};var clear=function(){var n=document.getElementById('__dw_manual_verification');if(n)n.remove()},success=function(){window.__dwVerificationState.passed=true;clear()},close=function(){window.__dwVerificationState.closed=true;clear()};sdk.render({verify_data:${JSON.stringify(JSON.stringify(decision))},captchaOptions:{successCb:success,closeCb:close,errorCb:function(){window.__dwVerificationState.failed=true}},secondVerifyWebOptions:{callBack:success,closeCallBack:close}});return true})()`);
+      return evaluate(`(function(){if(location.protocol!=='https:'||!['doubao.com','www.doubao.com'].includes(location.hostname)||(location.port&&location.port!=='443'))return false;var sdk=window.TTGCaptcha;if(!sdk||typeof sdk.render!=='function')return false;window.__dwVerificationState={passed:false};var success=function(){window.__dwVerificationState.passed=true},close=function(){window.__dwVerificationState.closed=true};sdk.render({verify_data:${JSON.stringify(JSON.stringify(decision))},captchaOptions:{successCb:success,closeCb:close,errorCb:function(){window.__dwVerificationState.failed=true}},secondVerifyWebOptions:{callBack:success,closeCallBack:close}});return true})()`);
     },
   };
 }

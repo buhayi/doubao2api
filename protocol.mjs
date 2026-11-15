@@ -198,7 +198,7 @@ export function vendorError(status, value = {}) {
         429,
         "豆包上游要求图片验证" +
           suffix +
-          "。请按独立窗口中的官网提示完成验证；本次请求未恢复时，可在管理台重新登录并完成验证后重试。",
+          "。本次请求已停止；请主动在官网完成验证或在管理台重新登录后重试。",
       ),
       "verification_required",
     );

@@ -7,7 +7,6 @@ import { loadConfig, baseUrl } from "./config.mjs";
 import { createStore } from "./store.mjs";
 import { createGateway } from "./server.mjs";
 import { createAdmin } from "./admin.mjs";
-import { createVerificationManager, withAutomaticVerification } from "../verification.mjs";
 
 const help = `豆包工作 · 通用 API 网关（Node.js 22+，无运行时 npm 依赖）
 
@@ -61,20 +60,10 @@ export async function runCli({
     if (config.accountId) io.warn("注意：DW_ACCOUNT_ID 已固定服务账号，优先于默认账号。");
     return;
   }
-  const rawApi = api;
-  const verification = createVerificationManager({ root: store.root, api: rawApi, store,
-    enabled: config.captchaManualFallback,
-    manualFallback: config.captchaManualFallback, manualTimeoutMs: config.captchaManualTimeoutMs,
-    timeoutMs: config.captchaTimeoutMs,
-    browserId: config.captchaBrowser, transport: config.captchaTransport });
-  if (config.captchaManualFallback) api = withAutomaticVerification(rawApi, verification);
-  const configuredLogin = (options) => loginFactory({ ...options, api: rawApi, captchaManualFallback: config.captchaManualFallback });
   if (command === "models" || command === "usage") {
-    try {
-      const { secret } = await store.account(config.accountId);
-      if (command === "models") io.table(Object.values((await api.catalog(secret)).models).map(({ id, name }) => ({ id, name })));
-      else io.log(JSON.stringify(await api.usage(secret), null, 2));
-    } finally { await verification.dispose(); }
+    const { secret } = await store.account(config.accountId);
+    if (command === "models") io.table(Object.values((await api.catalog(secret)).models).map(({ id, name }) => ({ id, name })));
+    else io.log(JSON.stringify(await api.usage(secret), null, 2));
     return;
   }
   const controller = new AbortController();
@@ -84,7 +73,7 @@ export async function runCli({
   try {
     if (command === "login") {
       await store.list(); // Secure/validate the dedicated data directory before opening a login window.
-      const login = configuredLogin({ root: store.root, api, standalone: true });
+      const login = loginFactory({ root: store.root, api, standalone: true });
       try {
         const flow = await login.start({ browserId: values.browser, signal: controller.signal, transport: values.loopback ? "port" : "pipe" });
         io.log("独立豆包登录窗口已打开。完成官网登录后，请在浏览器打开以下本机确认页面：");
@@ -101,11 +90,7 @@ export async function runCli({
     const apiKey = await store.apiKey(config.apiKey);
     if (command === "admin" && !config.adminPort) throw fail(400, "DW_ADMIN_PORT=0 已禁用管理台，请设置为 8786 或其他可用端口。");
     const gateway = command === "serve" ? createGateway({ ...config, store, api, apiKey }) : null;
-    const admin = config.adminPort ? createAdmin({ store, api, apiKey, config, loginFactory: configuredLogin, historyStatus: gateway?.historyStatus,
-      captchaStatus: async () => ({ enabled: config.captchaManualFallback, mode: "manual", automatic: false,
-        state: config.captchaManualFallback ? "manual" : "disabled", manualFallback: config.captchaManualFallback,
-        manualTimeoutMs: config.captchaManualTimeoutMs, verification: verification.status() }),
-      verificationStatus: () => verification.status() }) : null;
+    const admin = config.adminPort ? createAdmin({ store, api, apiKey, config, loginFactory, historyStatus: gateway?.historyStatus }) : null;
     const services = [gateway, admin].filter(Boolean);
     const close = () => Promise.all(services.map((service) => service.close()));
     const cancel = () => { void close(); };
@@ -137,7 +122,6 @@ export async function runCli({
       await close();
     }
   } finally {
-    await verification.dispose();
     signals.removeListener("SIGINT", stop);
     signals.removeListener("SIGTERM", stop);
   }

@@ -140,6 +140,8 @@ test("仅 decision.type=verify 判定人工验证，429 外壳码不当成验证
   assert.equal(verify.reason, "verification_required");
   assert.equal(verify.upstreamCode, 710022004);
   assert(!verify.message.includes("FIXTURE_PRIVATE_CHALLENGE"));
+  assert(!verify.message.includes("独立窗口"));
+  assert.match(verify.message, /本次请求已停止/);
   const rate = vendorError(429, {
     error_code: 710022004,
     error_msg: "FIXTURE_PRIVATE_TEXT",

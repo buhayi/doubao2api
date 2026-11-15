@@ -6,6 +6,7 @@ const paths = {
   shield: ["M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7l-9-4Z", "m8 12 3 3 5-6"],
   plus: ["M12 5v14", "M5 12h14"],
   refresh: ["M20 7v5h-5", "M4 17v-5h5", "M6.5 6.5A8 8 0 0 1 20 12", "M4 12a8 8 0 0 0 13.5 5.5"],
+  pulse: ["M2 12h4l3-8 6 16 3-8h4"],
   search: ["M21 21l-5-5"],
   star: ["m12 3 2.8 5.7 6.3.9-4.5 4.4 1 6.2-5.6-3-5.6 3 1-6.2L2.9 9.6l6.3-.9L12 3Z"],
   chevron: ["m9 5 7 7-7 7"],
@@ -89,20 +90,20 @@ function percent(window) {
 export function quotaBlock(check, compact = false) {
   const windows = check?.usage?.windows || [];
   const source = compact ? windows.slice(0, 1) : windows;
-  if (!source.length) return node("div", { class: "quota-unavailable" }, check?.usageError || (check?.state === "ok" ? "上游暂无额度信息" : "检测后查看额度"));
+  if (!source.length) return node("div", { class: "quota-unavailable" }, check?.usageError || (check?.source === "probe" ? "刷新状态查看额度" : check?.state === "ok" ? "上游暂无额度信息" : "检测后查看额度"));
   return node("div", { class: compact ? "quota-compact" : "quota-list" }, source.map((window) => {
     const used = percent(window);
     const value = window.display || (Number.isFinite(window.used) ? `已用 ${Number(window.used.toFixed(1))}%` : Number.isFinite(window.amount) && Number.isFinite(window.limit) ? `${window.amount} / ${window.limit} ${window.unit || "额度"}` : "暂无额度信息");
     return node("div", { class: "quota-item" }, node("div", { class: "quota-caption" }, node("span", {}, window.name || "使用额度"), node("strong", {}, value)), used !== null && node("progress", { class: used >= 90 ? "quota-progress warning" : "quota-progress", max: 100, value: used, "aria-label": `${window.name || "额度"}已使用 ${used.toFixed(1)}%` }), !compact && (window.resetsAt || window.runsOutAt) && node("small", { class: "muted" }, `${window.runsOutAt ? "到期" : "重置"}时间：${formatDate((window.runsOutAt || window.resetsAt) * 1000, true)}`));
   }));
 }
-export function accountRow(account, actions, busy = false) {
+export function accountRow(account, actions, busy = false, probing = false) {
   const [session, kind] = statusMeta[account.check.state] || statusMeta.unchecked;
   return node("tr", { class: account.default ? "is-default" : "" },
     node("td", {}, node("div", { class: "account-identity" }, node("span", { class: `account-avatar ${avatarTone(account.uid || account.name)}` }, (account.name || "豆").slice(0, 1)), node("div", { class: "identity-copy" }, node("div", { class: "account-title" }, node("button", { class: "name-button", type: "button", onClick: () => actions.manage(account) }, account.name), account.default && node("span", { class: "default-tag" }, icon("star", 11), "默认")), node("small", { class: "mono muted uid-chip" }, account.uid)))),
-    node("td", {}, node("div", { class: "status-stack" }, statusPill(account.enabled ? "已启用" : "已停用", account.enabled ? "success" : "neutral"), node("div", { class: `session-state ${kind}`, title: account.check.message || "" }, node("span", { class: "session-dot" }), session))),
+    node("td", {}, node("div", { class: "status-stack" }, statusPill(account.invalid ? "失效账号" : account.enabled ? "已启用" : "已停用", account.invalid ? "danger" : account.enabled ? "success" : "neutral"), node("div", { class: `session-state ${kind}`, title: account.check.message || "" }, node("span", { class: "session-dot" }), account.check.source === "probe" && account.check.state === "ok" ? "探活通过" : session))),
     node("td", {}, quotaBlock(account.check, true)),
-    node("td", { class: "date-cell" }, node("span", { class: "date-primary" }, formatDate(account.updatedAt)), node("small", { class: "muted" }, account.check.checkedAt ? `${formatDate(account.check.checkedAt)} 检测` : "尚未检测会话")),
-    node("td", {}, node("div", { class: "row-actions" }, iconButton("refresh", `检测 ${account.name}`, () => actions.check(account), busy, busy ? "is-busy" : ""), iconButton("star", account.default ? "当前默认账号" : `将 ${account.name} 设为默认`, () => actions.use(account), busy || account.default || !account.enabled, account.default ? "is-active-star" : ""), button("管理", { kind: "quiet", onClick: () => actions.manage(account), disabled: busy, symbol: "chevron" }))),
+    node("td", { class: "date-cell" }, node("span", { class: "date-primary" }, formatDate(account.updatedAt)), node("small", { class: "muted" }, account.check.checkedAt ? `${formatDate(account.check.checkedAt)} ${account.check.source === "probe" ? "探活" : account.check.source === "request" ? "请求" : "检测"}` : "尚未检测会话")),
+    node("td", {}, node("div", { class: "row-actions" }, button(probing ? "探活中" : "探活", { kind: "quiet", symbol: "pulse", title: `探活 ${account.name}`, "aria-label": `探活 ${account.name}`, onClick: () => actions.probe(account), disabled: busy }), iconButton("refresh", `检测 ${account.name}`, () => actions.check(account), busy, busy ? "is-busy" : ""), iconButton("star", account.default ? "当前默认账号" : `将 ${account.name} 设为默认`, () => actions.use(account), busy || account.default || !account.enabled || account.invalid, account.default ? "is-active-star" : ""), button("管理", { kind: "quiet", onClick: () => actions.manage(account), disabled: busy, symbol: "chevron" }))),
   );
 }

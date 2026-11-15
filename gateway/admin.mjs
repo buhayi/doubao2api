@@ -4,8 +4,11 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { createApi, fail } from "../protocol.mjs";
 import { createLoginManager } from "../login.mjs";
+import { createCompletion } from "../completion.mjs";
 import { baseUrl } from "./config.mjs";
 import { protocolOptions } from "./compat.mjs";
+import { createHistoryCleaner } from "./history.mjs";
+import { beginAccountOperation, failedAccountHealth } from "./account-health.mjs";
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -86,7 +89,7 @@ function usageView(usage) {
   };
 }
 
-export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus, captchaStatus, verificationStatus } = {}) {
+export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus } = {}) {
   if (!store) throw Error("需要提供管理台账号存储。");
   const connection = baseUrl(config.host || "127.0.0.1", config.port || 8787);
   const token = randomBytes(32).toString("hex");
@@ -94,6 +97,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
   const shutdown = new AbortController();
   const checks = new Map();
   const checking = new Map();
+  const probing = new Map();
+  const probeHistory = createHistoryCleaner({ api });
   const checkVersions = new Map();
   let checkVersion = 0;
   let job = null;
@@ -116,7 +121,6 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       message: current?.message || job.message || "",
       ...(job.active && job.flow?.url ? { url: job.flow.url } : {}),
       ...(current?.expiresAt ? { expiresAt: current.expiresAt } : {}),
-      ...(current?.captcha ? { captcha: current.captcha } : {}),
       ...(job.result ? { result: job.result } : {}),
     };
   }
@@ -159,6 +163,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
     const previous = checking.get(uid);
     if (previous?.updatedAt === account.updatedAt) return previous.promise;
     const version = ++checkVersion;
+    const startedAt = beginAccountOperation();
     const promise = (async () => {
       let result;
       try {
@@ -168,13 +173,17 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         catch (error) {
           const view = errorView(error);
           result.usageError = view.error.message;
-          if (view.error.code === "session_expired") { result.state = "expired"; result.message = view.error.message; }
+          result.state = failedAccountHealth(error, { source: "check", startedAt }).state;
+          result.message = view.error.message;
         }
       } catch (error) {
         const view = errorView(error);
         result = { state: view.error.code === "session_expired" ? "expired" : view.error.code === "rate_limited" ? "limited" : view.error.code === "verification_required" ? "verification" : "error", message: view.error.message, checkedAt: Date.now(), updatedAt: account.updatedAt };
       }
       if (signal.aborted) throw signal.reason;
+      if (result.state !== "ok") await store.recordHealth(account, {
+        state: result.state, source: "check", startedAt, checkedAt: result.checkedAt, message: result.message,
+      });
       return rememberCheck(uid, result, version);
     })();
     const pending = { updatedAt: account.updatedAt, promise };
@@ -182,15 +191,62 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
     try { return await promise; }
     finally { if (checking.get(uid) === pending) checking.delete(uid); }
   }
+  async function probeAccount(uid, signal) {
+    const account = await store.account(uid, { allowDisabled: true });
+    const previous = probing.get(uid);
+    if (previous?.updatedAt === account.updatedAt) return previous.promise;
+    const startedAt = beginAccountOperation();
+    const promise = (async () => {
+      let result;
+      try {
+        const catalog = await api.catalog(account.secret, { signal, force: true });
+        const models = Object.entries(catalog.models || {});
+        const selected = models.find(([id, model]) => /flash|快速/i.test(`${id} ${model.name || ""}`)) || models[0];
+        if (!selected) throw fail(502, "账号没有可用于探活的模型，请重新登录后再试。");
+        // Metadata can remain accessible even when chat is unavailable. Require
+        // a complete minimal reply and inspect upstream business/SSE errors.
+        const response = await createCompletion(api, account.secret, {
+          model: selected[0], messages: [{ role: "user", content: "hi" }], stream: false,
+        }, { signal, promptTools: false, idleMs: 60000,
+          cleanupConversation: config.hideHistory !== false ? (conversation) => conversation.conversationId
+            ? probeHistory.clean(account.secret, conversation) : undefined : undefined,
+        });
+        await response.json();
+        result = { state: "ok", source: "probe", startedAt, checkedAt: Date.now() };
+      } catch (error) {
+        if (signal.aborted) throw signal.reason;
+        result = failedAccountHealth(error, { source: "probe", startedAt });
+      }
+      if (signal.aborted) throw signal.reason;
+      await store.recordHealth(account, result);
+      const { startedAt: internalTime, ...publicResult } = result;
+      return { ...publicResult, updatedAt: account.updatedAt };
+    })();
+    const pending = { updatedAt: account.updatedAt, promise };
+    probing.set(uid, pending);
+    try { return await promise; }
+    finally { if (probing.get(uid) === pending) probing.delete(uid); }
+  }
   async function overview(signal) {
     const list = await store.list();
     let online = false;
     try {
       online = health ? Boolean(await health()) : (await fetch(new URL("/health", connection), { signal: AbortSignal.any([signal, AbortSignal.timeout(1500)]) })).ok;
     } catch { /* A stopped API gateway does not prevent account management. */ }
-    const accounts = list.map((account) => ({ ...account, check: checks.get(account.uid)?.updatedAt === account.updatedAt ? checks.get(account.uid) : { state: "unchecked" } }));
+    const accounts = list.map((account) => {
+      let check = checks.get(account.uid)?.updatedAt === account.updatedAt ? checks.get(account.uid) : { state: "unchecked" };
+      if (account.health && (account.invalid || account.health.checkedAt >= (check.checkedAt || 0)))
+        check = { ...check, ...account.health, updatedAt: account.updatedAt };
+      if (account.health?.state === "ok" && check.source === "probe") {
+        // A successful probe supersedes errors cached by a previous session or
+        // quota check. It does not query quota itself.
+        delete check.message;
+        delete check.usageError;
+      }
+      return { ...account, check };
+    });
     return { accounts, gateway: { online, baseUrl: connection, fixedAccountId: config.accountId || null,
-      verification: verificationStatus?.() || null }, login: loginStatus() };
+    }, login: loginStatus() };
   }
 
   const server = createServer(async (req, res) => {
@@ -204,7 +260,9 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
     req.once("aborted", abort);
     req.on("error", abort);
     res.once("close", abort);
-    const signal = AbortSignal.any([shutdown.signal, disconnected.signal, AbortSignal.timeout(Math.min(config.timeoutMs || 30000, 30000))]);
+    const isProbe = /^\/api\/accounts\/[^/?]+\/probe(?:\?|$)/.test(req.url || "");
+    const limit = isProbe ? 60000 : 30000;
+    const signal = AbortSignal.any([shutdown.signal, disconnected.signal, AbortSignal.timeout(Math.min(config.timeoutMs || limit, limit))]);
     try {
       if (!req.url?.startsWith("/") || req.url.startsWith("//")) throw fail(400, "请求地址格式不正确。");
       const path = new URL(req.url, "http://admin.local").pathname;
@@ -230,9 +288,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         timeoutMs: config.timeoutMs || 120000, maxConcurrency: config.maxConcurrency || 3,
         promptTools: config.promptTools !== false, fixedAccountId: config.accountId || null,
         hideHistory: config.hideHistory !== false, historyCleanup: historyStatus?.() || null,
-        captcha: { manualFallback: config.captchaManualFallback !== false, manualTimeoutMs: config.captchaManualTimeoutMs || 300000,
-          ...(captchaStatus ? await captchaStatus() : { enabled: config.captchaManualFallback !== false, mode: "manual", automatic: false,
-            state: config.captchaManualFallback === false ? "disabled" : "manual", message: "检测到人机验证时，立即打开人工验证窗口。" }) },
+        captcha: { enabled: false, mode: "disabled", automatic: false, manualFallback: false,
+          message: "遇到官网人机验证时返回验证错误。" },
         protocols: protocolOptions(connection),
       });
       if (path === "/api/key" && req.method === "POST") {
@@ -252,7 +309,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         if (job?.active) { job.controller.abort(); await job.promise; }
         return send(res, 200, loginStatus());
       }
-      const match = /^\/api\/accounts\/([^/]+)(?:\/(default|check|models))?$/.exec(path);
+      const match = /^\/api\/accounts\/([^/]+)(?:\/(default|check|probe|models))?$/.exec(path);
       if (match) {
         let uid;
         try { uid = decodeURIComponent(match[1]); } catch { throw fail(400, "账号 ID 编码无效。"); }
@@ -260,10 +317,17 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         const action = match[2];
         if (action === "models" && req.method === "GET") {
           const account = await store.account(uid, { allowDisabled: true });
-          const catalog = await api.catalog(account.secret, { signal, force: true });
+          const startedAt = beginAccountOperation();
+          let catalog;
+          try { catalog = await api.catalog(account.secret, { signal, force: true }); }
+          catch (error) {
+            if (!signal.aborted) await store.recordHealth(account, failedAccountHealth(error, { source: "request", startedAt }));
+            throw error;
+          }
           return send(res, 200, { models: Object.values(catalog.models).map(({ id, name }) => ({ id, name })) });
         }
         if (action === "check" && req.method === "POST") { await body(req, signal); return send(res, 200, await checkAccount(uid, signal)); }
+        if (action === "probe" && req.method === "POST") { await body(req, signal); return send(res, 200, await probeAccount(uid, signal)); }
         if (action === "default" && req.method === "POST") { await body(req, signal); await store.use(uid); return send(res, 200, { ok: true }); }
         if (!action && req.method === "PATCH") { await store.update(uid, await body(req, signal)); return send(res, 200, { ok: true }); }
         if (!action && req.method === "DELETE") { await body(req, signal); await store.remove(uid); checks.delete(uid); checkVersions.delete(uid); return send(res, 200, { ok: true }); }
@@ -297,7 +361,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
           server.close((error) => error ? reject(error) : resolve());
           server.closeAllConnections();
         }) : Promise.resolve();
-        await Promise.all([closed, job?.promise]);
+        await Promise.all([closed, job?.promise, ...[...checking.values(), ...probing.values()].map((pending) => pending.promise.catch(() => {}))]);
       })();
     },
   };

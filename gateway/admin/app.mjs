@@ -5,6 +5,7 @@ const content = document.getElementById("content");
 const state = {
   view: "accounts", accounts: [], gateway: {}, login: { state: "idle", active: false },
   filter: "all", search: "", token: "", checking: new Set(), checkingAll: false,
+  probing: new Set(), probingAll: false, probeCompleted: 0, probeTotal: 0,
   modelUid: "", models: [], modelSearch: "", modelLoading: false, modelError: "",
   settings: null, apiKey: "", syncError: "", drawerUid: null, clientProtocol: "chat",
 };
@@ -44,17 +45,17 @@ function banners() {
   const result = [];
   if (state.syncError) result.push(node("div", { class: "info-banner error", role: "alert" }, icon("alert"), state.syncError, button("重试", { kind: "quiet", onClick: () => void refresh().catch((error) => toast(error.message, true)) })));
   if (state.login.active) result.push(node("div", { class: "info-banner" }, icon("browser"), "有一个账号正在登录，完成后会自动加入账号池。", button("查看登录", { kind: "quiet", onClick: openLogin })));
-  for (const [uid, verification] of Object.entries(state.gateway.verification?.accounts || {})) {
-    if (verification.state !== "manual" || !Number.isSafeInteger(verification.expiresAt)) continue;
-    const account = state.accounts.find((item) => item.uid === uid);
-    result.push(node("div", { class: "info-banner warning", role: "status", "aria-live": "polite" }, icon("browser"),
-      `${account?.name || "当前账号"}需要人工验证，请在弹出的豆包窗口完成验证码。通过后原请求会自动继续。`));
-  }
   if (state.gateway.fixedAccountId) result.push(node("div", { class: "info-banner warning" }, icon("alert"), node("span", {}, "网关已固定使用账号 ", node("span", { class: "mono" }, state.gateway.fixedAccountId), "，固定配置优先于默认账号。")));
   return result;
 }
-async function refresh({ live = false } = {}) {
-  if (refreshTask) return refreshTask;
+async function refresh({ live = false, fresh = false } = {}) {
+  if (refreshTask) {
+    if (!fresh) return refreshTask;
+    // A poll already in flight may have read the account before the mutation.
+    // Wait for it, then fetch a new snapshot for the completed operation.
+    await refreshTask.catch(() => {});
+    return refresh({ live });
+  }
   refreshTask = (async () => {
     try {
       const result = await request("/api/overview");
@@ -94,15 +95,18 @@ function metric(label, value, note, { accent = false, account = false, symbol, t
   return node("div", { class: `metric metric-${tone}` }, node("div", { class: "metric-top" }, node("div", { class: "metric-label" }, label), symbol && node("span", { class: `metric-icon ${tone}` }, icon(symbol, 15))), node("div", { class: `metric-value${accent ? " accent" : ""}${account ? " account-metric" : ""}`, title: String(value) }, value), node("div", { class: "metric-note" }, note));
 }
 function renderAccounts() {
-  const enabled = state.accounts.filter((account) => account.enabled).length;
+  const enabled = state.accounts.filter((account) => account.enabled && !account.invalid).length;
+  const invalid = state.accounts.filter((account) => account.invalid).length;
+  const disabled = state.accounts.filter((account) => !account.enabled && !account.invalid).length;
   const defaultAccount = state.accounts.find((account) => account.default);
-  const checkButton = button(state.checkingAll ? "正在检测" : "刷新状态", { symbol: "refresh", className: state.checkingAll ? "spinner" : "", disabled: state.checkingAll || !enabled, onClick: () => void checkAll() });
+  const checkButton = button(state.checkingAll ? "正在检测" : "刷新状态", { symbol: "refresh", className: state.checkingAll ? "spinner" : "", disabled: state.checkingAll || state.probingAll || !enabled, onClick: () => void checkAll() });
+  const probeButton = button(state.probingAll ? `正在探活 ${state.probeCompleted}/${state.probeTotal}` : "全部探活", { id: "probe-all", symbol: "pulse", className: state.probingAll ? "spinner" : "", disabled: state.probingAll || state.checkingAll || !state.accounts.length, onClick: () => void probeAll() });
   content.replaceChildren(
-    pageHeading("账号池", "管理接入账号、登录会话与使用额度。", checkButton, button("添加账号", { kind: "primary", symbol: "plus", onClick: openLogin, disabled: state.accounts.length >= 64 })),
+    pageHeading("账号池", "管理接入账号、登录会话与使用额度。", checkButton, probeButton, button("添加账号", { kind: "primary", symbol: "plus", onClick: openLogin, disabled: state.accounts.length >= 64 })),
     ...banners(),
-    node("section", { class: "metrics", "aria-label": "账号池概览" }, metric("账号总数", state.accounts.length, "最多接入 64 个账号", { symbol: "users", tone: "indigo" }), metric("已启用", enabled, "可设为网关服务账号", { accent: true, symbol: "shield", tone: "emerald" }), metric("已停用", state.accounts.length - enabled, "暂停用于网关请求", { symbol: "layers", tone: "slate" }), metric("默认账号", defaultAccount?.name || "未设置", defaultAccount?.uid || "添加或启用一个账号", { account: true, symbol: "star", tone: "amber" })),
+    node("section", { class: "metrics", "aria-label": "账号池概览" }, metric("账号总数", state.accounts.length, "最多接入 64 个账号", { symbol: "users", tone: "indigo" }), metric("可用账号", enabled, "已启用且未失效", { accent: true, symbol: "shield", tone: "emerald" }), metric("失效账号", invalid, "探活或重新登录后恢复", { symbol: "alert", tone: "danger" }), metric("默认账号", defaultAccount?.name || "未设置", defaultAccount?.uid || "添加、启用或探活一个账号", { account: true, symbol: "star", tone: "amber" })),
     node("section", { class: "pool-panel", "aria-label": "账号列表" },
-      node("div", { class: "pool-toolbar" }, node("div", { class: "tabs", role: "tablist", "aria-label": "账号状态筛选" }, [["all", "全部账号", state.accounts.length], ["enabled", "已启用", enabled], ["disabled", "已停用", state.accounts.length - enabled]].map(([value, label, count]) => node("button", { type: "button", class: `tab${state.filter === value ? " active" : ""}`, role: "tab", "aria-selected": String(state.filter === value), onClick: () => { state.filter = value; renderAccounts(); } }, label, node("span", { class: "tab-count" }, count)))), searchField("搜索账号名称或 UID", state.search, (event) => { state.search = event.target.value; renderAccountRows(); })),
+      node("div", { class: "pool-toolbar" }, node("div", { class: "tabs", role: "tablist", "aria-label": "账号状态筛选" }, [["all", "全部账号", state.accounts.length], ["enabled", "已启用", enabled], ["disabled", "已停用", disabled], ["invalid", "失效账号", invalid]].map(([value, label, count]) => node("button", { type: "button", class: `tab${state.filter === value ? " active" : ""}`, role: "tab", "aria-selected": String(state.filter === value), onClick: () => { state.filter = value; renderAccounts(); } }, label, node("span", { class: "tab-count" }, count)))), searchField("搜索账号名称或 UID", state.search, (event) => { state.search = event.target.value; renderAccountRows(); })),
       node("div", { class: "table-scroll", id: "accounts-table-wrap" }, node("table", { class: "accounts-table", "aria-label": "账号池" }, node("thead", {}, node("tr", {}, ["账号", "状态", "使用额度", "最近更新", "操作"].map((title) => node("th", { scope: "col" }, title)))), node("tbody", { id: "account-rows" }))),
       node("div", { id: "account-empty" }),
       node("p", { class: "mobile-hint", id: "table-hint" }, "左右滑动查看完整账号信息"),
@@ -113,10 +117,10 @@ function renderAccounts() {
 }
 function renderAccountRows() {
   const query = state.search.trim().toLowerCase();
-  const accounts = state.accounts.filter((account) => (state.filter === "all" || account.enabled === (state.filter === "enabled")) && (!query || `${account.name} ${account.uid}`.toLowerCase().includes(query)));
+  const accounts = state.accounts.filter((account) => (state.filter === "all" || (state.filter === "invalid" ? account.invalid : !account.invalid && account.enabled === (state.filter === "enabled"))) && (!query || `${account.name} ${account.uid}`.toLowerCase().includes(query)));
   const table = document.getElementById("account-rows");
   if (!table) return;
-  table.replaceChildren(...accounts.map((account) => accountRow(account, { manage: openDrawer, check: checkAccount, use: useAccount }, state.checking.has(account.uid))));
+  table.replaceChildren(...accounts.map((account) => accountRow(account, { manage: openDrawer, check: checkAccount, probe: probeAccount, use: useAccount }, state.checking.has(account.uid) || state.probing.has(account.uid), state.probing.has(account.uid))));
   document.getElementById("accounts-table-wrap").hidden = !accounts.length;
   document.getElementById("table-hint").hidden = !accounts.length;
   const empty = document.getElementById("account-empty");
@@ -125,7 +129,7 @@ function renderAccountRows() {
   document.getElementById("account-count").textContent = accounts.length === state.accounts.length ? `共 ${state.accounts.length} 个账号` : `显示 ${accounts.length} / ${state.accounts.length} 个账号`;
 }
 async function checkAccount(account, { quiet = false } = {}) {
-  if (state.checking.has(account.uid)) return false;
+  if (state.checking.has(account.uid) || state.probing.has(account.uid)) return false;
   state.checking.add(account.uid);
   if (state.view === "accounts") renderAccountRows();
   if (state.drawerUid === account.uid && drawer?.open) renderDrawer();
@@ -133,7 +137,8 @@ async function checkAccount(account, { quiet = false } = {}) {
     const check = await request(accountPath(account.uid, "check"), { method: "POST" });
     const current = state.accounts.find((item) => item.uid === account.uid);
     if (current) current.check = check;
-    if (!quiet) toast(check.state === "ok" ? `${account.name} 的会话有效${check.usageError ? "，额度暂无法查询" : ""}` : check.message || "账号检测未通过。", check.state !== "ok");
+    await refresh({ live: quiet, fresh: true });
+    if (!quiet) toast(check.state === "ok" ? `${account.name} 的会话有效${account.invalid ? "，探活通过后可恢复使用" : ""}` : check.message || "账号检测未通过，已归入失效账号。", check.state !== "ok");
     return check.state === "ok";
   } catch (error) { if (!quiet) toast(error.message, true); return false; }
   finally {
@@ -143,8 +148,8 @@ async function checkAccount(account, { quiet = false } = {}) {
   }
 }
 async function checkAll() {
-  if (state.checkingAll) return;
-  const queue = state.accounts.filter((account) => account.enabled && !state.checking.has(account.uid));
+  if (state.checkingAll || state.probingAll) return;
+  const queue = state.accounts.filter((account) => account.enabled && !account.invalid && !state.checking.has(account.uid) && !state.probing.has(account.uid));
   if (!queue.length) return;
   state.checkingAll = true;
   renderAccounts();
@@ -158,6 +163,47 @@ async function checkAll() {
     await refresh();
   } catch (error) { toast(error.message, true); }
   finally { state.checkingAll = false; if (state.view === "accounts") renderAccounts(); }
+}
+async function probeAccount(account, { quiet = false } = {}) {
+  if (state.probing.has(account.uid) || state.checking.has(account.uid)) return false;
+  state.probing.add(account.uid);
+  if (state.view === "accounts") renderAccountRows();
+  if (state.drawerUid === account.uid && drawer?.open) renderDrawer();
+  try {
+    const result = await request(accountPath(account.uid, "probe"), { method: "POST" });
+    await refresh({ live: quiet, fresh: true });
+    if (!quiet) toast(result.state === "ok" ? `${account.name} 探活通过${account.enabled ? "，可用于网关请求" : "，账号仍保持手动停用"}` : `${account.name} 探活失败，已归入失效账号。${result.message || ""}`, result.state !== "ok");
+    return result.state === "ok";
+  } catch (error) { if (!quiet) toast(error.message, true); return false; }
+  finally {
+    state.probing.delete(account.uid);
+    if (state.view === "accounts") renderAccountRows();
+    if (state.drawerUid === account.uid && drawer?.open) renderDrawer();
+  }
+}
+async function probeAll() {
+  if (state.probingAll || state.checkingAll) return;
+  const queue = state.accounts.filter((account) => !state.probing.has(account.uid) && !state.checking.has(account.uid));
+  if (!queue.length) return;
+  state.probingAll = true;
+  state.probeCompleted = 0;
+  state.probeTotal = queue.length;
+  renderAccounts();
+  let next = 0, success = 0;
+  async function worker() {
+    while (next < queue.length) {
+      if (await probeAccount(queue[next++], { quiet: true })) success++;
+      state.probeCompleted++;
+      const control = document.getElementById("probe-all");
+      if (control) control.replaceChildren(icon("pulse"), `正在探活 ${state.probeCompleted}/${state.probeTotal}`);
+    }
+  }
+  try {
+    await Promise.all([worker(), worker()]);
+    await refresh();
+    toast(`已探活 ${queue.length} 个账号：${success} 个通过，${queue.length - success} 个未通过`, success !== queue.length);
+  } catch (error) { toast(error.message, true); }
+  finally { state.probingAll = false; if (state.view === "accounts") renderAccounts(); }
 }
 async function useAccount(account) {
   try {
@@ -201,7 +247,7 @@ function renderDrawer() {
     try { await request(accountPath(account.uid), { method: "PATCH", body: { name: input.value } }); drawerDraft = input.value.trim(); await refresh(); renderDrawer(); toast("账号名称已保存"); }
     catch (error) { toast(error.message, true); submit.disabled = false; }
   } }, node("label", { class: "field-label", for: "account-name" }, "账号名称"), input, button("保存名称", { type: "submit" }));
-  const toggle = node("button", { class: "switch", type: "button", role: "switch", "aria-label": `启用 ${account.name}`, "aria-checked": String(account.enabled), onClick: async () => {
+  const toggle = node("button", { class: "switch", type: "button", role: "switch", "aria-label": `启用 ${account.name}`, "aria-checked": String(account.enabled), disabled: state.probing.has(account.uid), onClick: async () => {
     toggle.disabled = true;
     try { await request(accountPath(account.uid), { method: "PATCH", body: { enabled: !account.enabled } }); await refresh(); renderDrawer(); toast(account.enabled ? "账号已停用" : "账号已启用"); }
     catch (error) { toast(error.message, true); toggle.disabled = false; }
@@ -209,14 +255,16 @@ function renderDrawer() {
   drawer.append(node("div", { class: "drawer-content" },
     node("div", { class: "drawer-identity" }, node("span", { class: `account-avatar ${avatarTone(account.uid || account.name)}` }, (account.name || "豆").slice(0, 1)), node("div", {}, node("strong", {}, account.name), node("small", { class: "mono muted" }, account.uid))),
     form,
-    node("div", { class: "toggle-line" }, node("div", {}, node("strong", {}, "启用账号"), node("small", {}, "停用后不再用于后续网关请求")), toggle),
+    node("div", { class: "toggle-line" }, node("div", {}, node("strong", {}, "启用账号"), node("small", {}, account.invalid ? "账号已失效，探活通过或重新登录后才能使用" : "停用后不再用于后续网关请求")), toggle),
     drawerSessionSection(account), drawerQuotaSection(account),
-    node("section", { class: "drawer-section drawer-actions" }, button(account.default ? "当前默认账号" : "设为默认账号", { symbol: "star", disabled: account.default || !account.enabled, onClick: () => void useAccount(account) }), button("重新登录 / 更新会话", { symbol: "browser", onClick: () => { drawer.close(); openLogin(); } }), button("移除账号", { kind: "danger", symbol: "trash", onClick: () => removeAccount(account) })),
+    node("section", { class: "drawer-section drawer-actions" }, button(account.default ? "当前默认账号" : "设为默认账号", { symbol: "star", disabled: account.default || !account.enabled || account.invalid, onClick: () => void useAccount(account) }), button("重新登录 / 更新会话", { symbol: "browser", onClick: () => { drawer.close(); openLogin(); } }), button("移除账号", { kind: "danger", symbol: "trash", onClick: () => removeAccount(account) })),
   ));
 }
 function drawerSessionSection(account) {
   const [label, kind] = statusMeta[account.check.state] || statusMeta.unchecked;
-  return node("section", { class: "drawer-section", id: "drawer-session" }, node("h3", {}, "登录会话"), node("div", { class: "drawer-status-line" }, statusPill(label, kind), button("检测", { kind: "quiet", symbol: "refresh", disabled: state.checking.has(account.uid), onClick: () => void checkAccount(account) })), account.check.message && node("p", { class: "drawer-message" }, account.check.message), node("p", { class: "field-hint" }, account.check.checkedAt ? `最近检测：${formatDate(account.check.checkedAt, true)}` : "尚未检测。点击检测以核验会话并查询额度。"));
+  const busy = state.checking.has(account.uid) || state.probing.has(account.uid);
+  const source = account.check.source === "probe" ? "探活" : account.check.source === "request" ? "请求" : "检测";
+  return node("section", { class: "drawer-section", id: "drawer-session" }, node("h3", {}, "登录会话与探活"), node("div", { class: "drawer-status-line" }, statusPill(account.invalid ? "失效账号" : account.check.source === "probe" && account.check.state === "ok" ? "探活通过" : label, account.invalid ? "danger" : kind), node("div", { class: "row-actions" }, button("检测", { kind: "quiet", symbol: "refresh", disabled: busy, onClick: () => void checkAccount(account) }), button(state.probing.has(account.uid) ? "正在探活" : "探活", { kind: "quiet", symbol: "pulse", disabled: busy, onClick: () => void probeAccount(account) }))), account.check.message && node("p", { class: "drawer-message" }, account.check.message), node("p", { class: "field-hint" }, account.check.checkedAt ? `最近${source}：${formatDate(account.check.checkedAt, true)}` : "尚未检测。点击检测以核验会话并查询额度。"), node("p", { class: "field-hint" }, "探活会发送一次简短对话，可能消耗少量额度。失效账号探活通过后恢复；手动停用状态会保留。"));
 }
 function drawerQuotaSection(account) {
   return node("section", { class: "drawer-section", id: "drawer-quota" }, node("h3", {}, "使用额度", account.check.usage?.plan && node("small", { class: "muted" }, ` · ${account.check.usage.plan}`)), quotaBlock(account.check));
@@ -270,7 +318,7 @@ function renderLogin() {
   const success = login.state === "success";
   const failed = ["error", "cancelled", "expired"].includes(login.state);
   const titles = { starting: "正在打开独立浏览器", waiting: "等待你完成登录", verifying: "正在核验官网验证", awaiting_confirmation: "登录完成，请确认接入", importing: "正在核验账号", success: "账号已接入", cancelled: "登录已取消", expired: "登录已超时", error: "登录需要检查" };
-  const status = node("div", { class: `login-status login-${login.state}${failed ? " error" : ""}` }, icon(success ? "check" : failed ? "alert" : "browser", 23), node("div", {}, node("strong", {}, login.captcha?.state === "manual" ? "等待人工验证" : titles[login.state] || "正在读取登录状态"), node("p", {}, login.message || "请在新打开的独立浏览器中完成扫码或验证码登录。")));
+  const status = node("div", { class: `login-status login-${login.state}${failed ? " error" : ""}` }, icon(success ? "check" : failed ? "alert" : "browser", 23), node("div", {}, node("strong", {}, titles[login.state] || "正在读取登录状态"), node("p", {}, login.message || "请在新打开的独立浏览器中完成扫码或验证码登录。")));
   const confirm = button(login.state === "importing" ? "正在核验" : "确认接入", { kind: "primary", disabled: login.state !== "awaiting_confirmation", onClick: async () => {
     confirm.disabled = true;
     try { acceptLogin(await request("/api/login/confirm", { method: "POST" })); scheduleLogin(); }
@@ -380,8 +428,7 @@ function renderSettings() {
     ["管理台端口", config.adminPort], ["支持协议", protocols.map((item) => item.name).join(" / ")], ["账号策略", config.fixedAccountId ? "固定指定账号" : "默认账号"],
     ["请求超时", `${config.timeoutMs / 1000} 秒`], ["单账号并发", `${config.maxConcurrency} 个对话`], ["实验性工具桥", config.promptTools ? "已启用" : "已关闭"],
     ["上游历史", config.hideHistory ? "会话完成后自动隐藏" : "保留会话记录"],
-    ["人机验证", config.captcha?.manualFallback === false ? "已关闭" : "检测到后立即弹窗 · 人工完成"],
-    ["人工验证等待", `最多 ${(config.captcha?.manualTimeoutMs || 300000) / 60000} 分钟`],
+    ["人机验证", "返回验证错误"],
     ...(config.hideHistory && config.historyCleanup ? [["已隐藏会话", config.historyCleanup.hidden], ["隐藏未完成", config.historyCleanup.failed]] : []),
     ...(config.fixedAccountId ? [["固定账号 UID", config.fixedAccountId]] : []), ["数据目录", config.dataDir],
   ];

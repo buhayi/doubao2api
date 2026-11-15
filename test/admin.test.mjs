@@ -51,17 +51,22 @@ async function fixture(t, options = {}) {
   return { root, store, api, admin, url, token, call };
 }
 
-test("管理台：展示人工验证状态与等待配置，完成后状态更新", async (t) => {
-  let state = "manual";
-  const f = await fixture(t, { verificationStatus: () => ({ accounts: { "a:0": { state, expiresAt: 12345 } } }) });
-  assert.equal((await (await f.call("/api/overview")).json()).gateway.verification.accounts["a:0"].state, "manual");
+test("管理台：旧人工验证配置和状态供应器不能重新启用弹窗", async (t) => {
+  let supplied = 0;
+  const f = await fixture(t, {
+    config: { captchaManualFallback: true, autoCaptcha: true, captchaManualTimeoutMs: 300000 },
+    verificationStatus: () => { supplied++; return { accounts: { "a:0": { state: "manual", expiresAt: Date.now()+300000 } } }; },
+    captchaStatus: () => { supplied++; return { mode: "manual", manualFallback: true }; },
+  });
+  const overview = await (await f.call("/api/overview")).json();
+  assert.equal(overview.gateway.verification, undefined);
   const settings = await (await f.call("/api/settings")).json();
-  assert.equal(settings.captcha.manualFallback, true);
-  assert.equal(settings.captcha.manualTimeoutMs, 300000);
-  assert.equal(settings.captcha.mode, "manual");
+  assert.equal(settings.captcha.manualFallback, false);
+  assert.equal(settings.captcha.manualTimeoutMs, undefined);
+  assert.equal(settings.captcha.mode, "disabled");
   assert.equal(settings.captcha.automatic, false);
-  state = "verified";
-  assert.equal((await (await f.call("/api/overview")).json()).gateway.verification.accounts["a:0"].state, "verified");
+  assert.equal(settings.captcha.enabled, false);
+  assert.equal(supplied, 0);
 });
 
 test("管理台配置：默认 8786、可禁用、拒绝非法或重复端口", async (t) => {

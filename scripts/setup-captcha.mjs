@@ -40,7 +40,7 @@ try {
   console.log("正在安装 CPU 图像库和本地 OCR 模型；运行时不调用识别 API…");
   await run(python, ["-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "-r", join(root, "captcha", "requirements.txt")]);
   await run(python, ["-I", "-c", "import cv2,numpy,PIL,ddddocr,onnxruntime; print('本地识别依赖已就绪。')"]);
-  console.log("安装完成。重启 npm start 后，会自动尝试滑块、旋转和文字／图形点选验证。");
+  console.log("历史本地识别工具安装完成，可运行 npm run captcha:test；网关与浏览器登录不调用此环境。");
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

@@ -35,8 +35,8 @@ test("配置：零配置默认值、.env 与环境优先级、IPv6 地址", asyn
   assert.equal(defaults.hideHistory, true);
   assert.equal(defaults.maxConcurrency, 3);
   assert.equal(defaults.autoCaptcha, false);
-  assert.equal(defaults.captchaManualFallback, true);
-  assert.equal(defaults.captchaManualTimeoutMs, 300000);
+  assert.equal(defaults.captchaManualFallback, false);
+  assert.equal(defaults.captchaManualTimeoutMs, undefined);
   await writeFile(join(cwd, ".env"), 'DW_PORT=9000\nDW_API_KEY="sk-env-fixture-123456"\nDW_DATA_DIR=private\nDW_CORS_ORIGINS=https://chat.example.test,http://localhost:3000\nDW_PROMPT_TOOLS=false\nDW_MAX_CONCURRENCY=2\n');
   assert.equal((await loadConfig({ cwd, env: {} })).maxConcurrency, 2);
   const config = await loadConfig({ cwd, env: { DW_PORT: "9001", DW_MAX_CONCURRENCY: "4", DW_HIDE_HISTORY: "false" } });
@@ -51,8 +51,8 @@ test("配置：零配置默认值、.env 与环境优先级、IPv6 地址", asyn
   assert.equal(baseUrl("::1", 8787), "http://[::1]:8787/v1");
   const manual = await loadConfig({ cwd, env: { DW_AUTO_CAPTCHA: "false", DW_CAPTCHA_MANUAL_FALLBACK: "true", DW_CAPTCHA_MANUAL_TIMEOUT_MS: "120000" } });
   assert.equal(manual.autoCaptcha, false);
-  assert.equal(manual.captchaManualFallback, true);
-  assert.equal(manual.captchaManualTimeoutMs, 120000);
+  assert.equal(manual.captchaManualFallback, false);
+  assert.equal(manual.captchaManualTimeoutMs, undefined);
   assert.equal((await loadConfig({ cwd, env: { DW_AUTO_CAPTCHA: "true" } })).autoCaptcha, false);
   assert.equal((await loadConfig({ cwd, env: { DW_CAPTCHA_MANUAL_FALLBACK: "false" } })).captchaManualFallback, false);
 });
@@ -77,7 +77,6 @@ test("配置：拒绝无法通过请求头传输的密钥、异常端口、超�
     { DW_HOST: "http://127.0.0.1:8787" }, { DW_TIMEOUT_MS: "1" }, { DW_MAX_CONCURRENCY: "0" },
     { DW_CORS_ORIGINS: "https://site.test/path" }, { DW_CORS_ORIGINS: "null" }, { DW_CORS_ORIGINS: "https://site.test/" },
     { DW_PROMPT_TOOLS: "yes" }, { DW_HIDE_HISTORY: "yes" }, { DW_HIDE_HISTORY: "1" }, { DW_DATA_DIR: "." }, { DW_DATA_DIR: ".." }, { DW_DATA_DIR: resolve(cwd, "../../") },
-    { DW_CAPTCHA_MANUAL_FALLBACK: "yes" }, { DW_CAPTCHA_MANUAL_TIMEOUT_MS: "9999" }, { DW_CAPTCHA_MANUAL_TIMEOUT_MS: "600001" },
   ]) await assert.rejects(loadConfig({ cwd, env }));
   for (const key of [undefined, null, 123, "", " ", " key", "key ", "中文", "key\n", "key\r", "key\t", "key\0", "key\x7f"])
     assert.throws(() => validateApiKey(key), /DW_API_KEY/);

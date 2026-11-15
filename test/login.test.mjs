@@ -37,20 +37,22 @@ test("独立登录门户不回显 Cookie，取消与来源校验可靠，双开�
   });
   try {
     const flow = await manager.start();
-    assert.equal(flow.status().captcha.state, "manual");
+    assert.equal(flow.status().captcha, undefined);
     assert(new URL(flow.url).hostname === "127.0.0.1");
     const html = await fetch(flow.url);
     assert.equal(html.status, 200);
     assert.match(await html.text(), /独立浏览器/);
     const { Script } = await import("node:vm");
-    new Script(await (await fetch(flow.url + "flow.js")).text());
+    const flowScript = await (await fetch(flow.url + "flow.js")).text();
+    new Script(flowScript);
+    assert(!flowScript.includes("等待人工验证"));
     await assert.rejects(manager.start(), (e) => e.status === 409);
     assert.equal((await fetch(flow.url + "status")).status, 403);
     const status = await (
       await fetch(flow.url + "status", { headers: { "X-Doubao-Login": "1" } })
     ).json();
     assert.equal(status.state, "waiting");
-    assert.equal(status.captcha.state, "manual");
+    assert.equal(status.captcha, undefined);
     assert.equal(status.access, undefined);
     assert.equal(
       (

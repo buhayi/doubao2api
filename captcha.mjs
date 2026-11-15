@@ -209,36 +209,10 @@ export function captchaActions(challenge, result) {
 export function createCaptchaController({ solver, maxAttempts = 3, now = Date.now } = {}) {
   const attempts = new Map();
   let state = { state: "idle", attempts: 0, message: "" };
-  let manual = false;
   return {
     status: () => ({ ...state }),
-    async requestManual(browser, { signal, onStatus } = {}) {
-      signal?.throwIfAborted();
-      if (manual) return { ...state };
-      manual = true;
-      state = { ...state, state: "manual", message: "检测到人机验证，请在弹出的浏览器窗口中完成人工验证。" };
-      onStatus?.({ ...state });
-      try { await browser.captcha?.requestManual?.({ signal }); }
-      catch (error) {
-        if (signal?.aborted) throw error;
-        state = { ...state, focusFailed: true, message: "需要人工验证，请切换到独立豆包窗口完成官网验证。" };
-        onStatus?.({ ...state });
-      }
-      return { ...state };
-    },
     async inspect(browser, { signal, onStatus } = {}) {
       signal?.throwIfAborted();
-      if (manual) {
-        const after = await browser.captcha?.describe?.();
-        const passed = await browser.captcha?.passed?.();
-        signal?.throwIfAborted();
-        if (passed === true || (!after && passed !== false)) {
-          state = { ...state, state: "solved", message: "人工验证已完成，正在核验账号会话。" };
-          onStatus?.({ ...state });
-          return { present: false, solved: true, ...state };
-        }
-        return { present: true, solved: false, ...state };
-      }
       let challenge;
       try { challenge = await browser.captcha?.capture(); }
       catch (error) {

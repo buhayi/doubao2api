@@ -259,10 +259,9 @@ export async function createCompletion(
   api,
   secret,
   body,
-  { signal, promptTools = true, idleMs, cleanupConversation, onVerification } = {},
+  { signal, promptTools = true, idleMs, cleanupConversation, onError } = {},
 ) {
-  const verificationOptions = typeof onVerification === "function" ? { onVerification } : {};
-  const catalog = await api.catalog(secret, { signal, ...verificationOptions }),
+  const catalog = await api.catalog(secret, { signal }),
     model = catalog.models[body.model];
   if (!model)
     throw fail(404, "该账号当前模型目录没有这个模型，请刷新目录后重选。");
@@ -289,26 +288,9 @@ export async function createCompletion(
     return "failed";
   }) : undefined;
   async function* events() {
-    let current = secret, recovered = false, emitted = false;
     try {
-      for (;;) {
-        let response;
-        try {
-          response = await api.post(current, "/chat/completion", payload, { signal: combined, stream: true, ...verificationOptions });
-          for await (const delta of decodeEvents(response, { signal: combined, idleMs, onConversation: observe })) {
-            emitted = true;
-            yield delta;
-          }
-          return;
-        } catch (error) {
-          // Only an explicit rejection before a conversation acknowledgement
-          // or any output can be replayed, with the same payload and account.
-          if (error.reason !== "verification_required" || recovered || emitted || acknowledged || conversation.conversationId ||
-              error.automaticVerificationAttempted || !api.recover || (response && api.canRecover?.(response) === false)) throw error;
-          current = await api.recover(current, error, { signal: combined, ...verificationOptions });
-          recovered = true;
-        }
-      }
+      const response = await api.post(secret, "/chat/completion", payload, { signal: combined, stream: true });
+      yield* decodeEvents(response, { signal: combined, idleMs, onConversation: observe });
     } finally { await cleanup?.(); }
   }
   const iterator = events()[Symbol.asyncIterator]();
@@ -398,6 +380,7 @@ export async function createCompletion(
           }
           c.enqueue(new TextEncoder().encode(chunk(delta)));
         } catch (e) {
+          await onError?.(e);
           controller.abort();
           c.error(e);
         }

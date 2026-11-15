@@ -8,7 +8,6 @@ import { homedir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
 import { once } from "node:events";
 import { createCaptchaBrowser } from "./captcha-browser.mjs";
-import { createCaptchaController } from "./captcha.mjs";
 import { win32 as winPath } from "node:path";
 import {
   envValue,
@@ -498,7 +497,6 @@ export class BrowserLogin {
     ttlMs = 10 * 60_000,
     platform = process.platform,
     now = Date.now,
-    captchaManualFallback = true,
   }) {
     this.tmpRoot = tmpRoot;
     this.importAccount = importAccount;
@@ -509,8 +507,6 @@ export class BrowserLogin {
     this.ttlMs = ttlMs;
     this.platform = platform;
     this.now = now;
-    this.captchaManualFallback = captchaManualFallback;
-    this.captcha = createCaptchaController();
     this.current = null;
     this.disposed = false;
     this.state = {
@@ -563,7 +559,6 @@ export class BrowserLogin {
       ready: null,
       controller: new AbortController(),
     };
-    this.captcha = createCaptchaController();
     this.current = session;
     const startedAt = this.now();
     this.state = {
@@ -676,28 +671,6 @@ export class BrowserLogin {
         );
         await this.finish(session);
         return;
-      }
-      if (this.captchaManualFallback && session.handle.captcha?.describe) {
-        const signal = session.context.signal ? AbortSignal.any([session.context.signal, session.controller.signal]) : session.controller.signal;
-        const present = Boolean(await session.handle.captcha.describe());
-        signal.throwIfAborted();
-        if (this.current !== session || session.cancelled) return;
-        if (present || this.captcha.status().state === "manual") {
-          if ((await session.handle.captcha?.outcome?.())?.closed) {
-            this.update(session, "cancelled", "官网验证已关闭，本次登录已取消。");
-            await this.finish(session);
-            return;
-          }
-          await this.captcha.requestManual(session.handle, { signal,
-            onStatus: (captcha) => this.update(session, "waiting", captcha.message, { captcha }),
-          });
-          const result = await this.captcha.inspect(session.handle, { signal,
-            onStatus: (captcha) => this.update(session, "waiting", captcha.message, { captcha }),
-          });
-          if (this.current !== session || session.cancelled) return;
-          if (result.present) { this.schedule(session); return; }
-          this.captcha = createCaptchaController();
-        }
       }
       const cookies = doubaoCookies(await session.handle.cookies());
       if (this.current !== session || session.cancelled) return;

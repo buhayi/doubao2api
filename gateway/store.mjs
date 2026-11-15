@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readAuth, saveAuth, fail } from "../protocol.mjs";
 import { protectWindowsProfile } from "../windows-browser.mjs";
 import { validateApiKey } from "./config.mjs";
+import { healthStates, healthSources, isInvalidAccount, isAvailableAccount } from "./account-health.mjs";
 
 async function protectRoot(root) {
   if (root === parse(root).root) throw Error("不能将磁盘根目录作为私有数据目录。");
@@ -69,6 +70,14 @@ function validateAccounts(state) {
       if (account.uid !== secret.userId + ":" + (secret.enterpriseType || "0") || seen.has(account.uid)) throw Error();
       if (typeof account.name !== "string" || !Number.isSafeInteger(account.updatedAt)) throw Error();
       if (account.enabled !== undefined && typeof account.enabled !== "boolean") throw Error();
+      if (account.health !== undefined) {
+        const health = account.health;
+        if (!health || !healthStates.has(health.state) || !healthSources.has(health.source)
+          || !Number.isSafeInteger(health.startedAt) || health.startedAt < 1
+          || !Number.isSafeInteger(health.checkedAt) || health.checkedAt < 1
+          || Object.keys(health).some((key) => !["state", "source", "startedAt", "checkedAt", "message"].includes(key))
+          || health.message !== undefined && (typeof health.message !== "string" || health.message.length > 600 || /[\u0000-\u001f\u007f]/.test(health.message))) throw Error();
+      }
       seen.add(account.uid);
     }
     if (state.defaultUid !== null && !seen.has(state.defaultUid)) throw Error();
@@ -79,12 +88,18 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
   const root = resolve(directory);
   const accountsFile = join(root, "accounts.json");
   let initialization;
+  let mutationQueue = Promise.resolve();
   const ready = () => initialization ??= Promise.resolve().then(() => secureRoot(root));
   const load = async () => {
     await ready();
     return validateAccounts(await readJson(accountsFile, { version: 1, defaultUid: null, accounts: [] }));
   };
-  async function mutate(change) {
+  function mutate(change) {
+    const pending = mutationQueue.then(() => writeMutation(change));
+    mutationQueue = pending.catch(() => {});
+    return pending;
+  }
+  async function writeMutation(change) {
     await ready();
     const lock = join(root, "accounts.lock");
     let handle;
@@ -134,12 +149,16 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
     },
     async list() {
       const state = await load();
-      return state.accounts.map(({ uid, name, updatedAt, enabled }) => ({ uid, name, updatedAt, enabled: enabled !== false, default: uid === state.defaultUid }));
+      return state.accounts.map((account) => ({ uid: account.uid, name: account.name, updatedAt: account.updatedAt,
+        enabled: account.enabled !== false, invalid: isInvalidAccount(account), default: account.uid === state.defaultUid,
+        ...(account.health ? { health: Object.fromEntries(Object.entries(account.health).filter(([key]) => key !== "startedAt")) } : {}),
+      }));
     },
     async account(uid, { allowDisabled = false } = {}) {
       const state = await load();
       const account = state.accounts.find((a) => a.uid === (uid || state.defaultUid));
-      if (!account) throw fail(503, uid ? "指定的网关账号不存在，请检查 DW_ACCOUNT_ID。" : state.accounts.length ? "所有账号已停用，请先在管理台启用一个账号。" : "还没有登录账号，请先在管理台添加账号或运行 npm run login。");
+      if (!account) throw fail(503, uid ? "指定的网关账号不存在，请检查 DW_ACCOUNT_ID。" : state.accounts.some(isInvalidAccount) ? "没有可用账号，请在管理台探活失效账号或重新登录。" : state.accounts.length ? "所有账号已停用，请先在管理台启用一个账号。" : "还没有登录账号，请先在管理台添加账号或运行 npm run login。");
+      if (isInvalidAccount(account) && !allowDisabled) throw fail(503, "指定的网关账号已失效，请在管理台探活或重新登录该账号。");
       if (account.enabled === false && !allowDisabled) throw fail(503, "指定的网关账号已停用，请先在管理台启用该账号。");
       return { ...account, secret: readAuth(account.auth) };
     },
@@ -150,9 +169,12 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
         if (index < 0) {
           if (state.accounts.length >= 64) throw fail(409, "账号池已达到 64 个账号上限，请先移除不再使用的账号。");
           state.accounts.push(account);
-        } else state.accounts[index] = { ...account, enabled: state.accounts[index].enabled !== false };
+        } else {
+          account.updatedAt = Math.max(account.updatedAt, state.accounts[index].updatedAt + 1);
+          state.accounts[index] = { ...account, enabled: state.accounts[index].enabled !== false };
+        }
         const saved = state.accounts.find((a) => a.uid === account.uid);
-        if (saved.enabled !== false) state.defaultUid ??= account.uid;
+        if (isAvailableAccount(saved)) state.defaultUid ??= account.uid;
         return { uid: account.uid, name: account.name, updated: index >= 0 };
       });
     },
@@ -164,14 +186,31 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
         if (!current) throw fail(409, "账号已移除，验证结果未保存。");
         if (readAuth(current.auth).cookieHeader !== expectedCookieHeader) throw fail(409, "账号会话已更新，验证结果未覆盖当前会话。");
         current.auth = account.auth;
-        current.updatedAt = account.updatedAt;
+        current.updatedAt = Math.max(account.updatedAt, current.updatedAt + 1);
+        delete current.health;
+        if (isAvailableAccount(current)) state.defaultUid ??= uid;
         return { uid: current.uid, updatedAt: current.updatedAt };
+      });
+    },
+    async recordHealth(account, result) {
+      return mutate((state) => {
+        const current = state.accounts.find((item) => item.uid === account.uid);
+        // Results belong to the session that made the request. A late failure
+        // must not invalidate a new login, a removed account or a newer probe.
+        if (!current || current.updatedAt !== account.updatedAt || current.auth.access !== account.auth.access
+          || (current.health?.startedAt || 0) > result.startedAt) return false;
+        current.health = { ...result };
+        if (!isAvailableAccount(current) && state.defaultUid === current.uid)
+          state.defaultUid = state.accounts.find(isAvailableAccount)?.uid ?? null;
+        if (isAvailableAccount(current)) state.defaultUid ??= current.uid;
+        return true;
       });
     },
     async use(uid) {
       return mutate((state) => {
         const account = state.accounts.find((a) => a.uid === uid);
         if (!account) throw fail(404, "这个账号不存在，请先查看账号列表。");
+        if (isInvalidAccount(account)) throw fail(409, "请先探活成功或重新登录，再设为默认账号。");
         if (account.enabled === false) throw fail(409, "请先启用账号，再设为默认账号。");
         state.defaultUid = uid;
       });
@@ -187,9 +226,9 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
         if (!account) throw fail(404, "这个账号不存在。");
         if (changes.name !== undefined) account.name = changes.name.trim();
         if (changes.enabled !== undefined) account.enabled = changes.enabled;
-        if (account.enabled === false && state.defaultUid === uid)
-          state.defaultUid = state.accounts.find((a) => a.enabled !== false)?.uid ?? null;
-        if (account.enabled !== false) state.defaultUid ??= uid;
+        if (!isAvailableAccount(account) && state.defaultUid === uid)
+          state.defaultUid = state.accounts.find(isAvailableAccount)?.uid ?? null;
+        if (isAvailableAccount(account)) state.defaultUid ??= uid;
       });
     },
     async remove(uid) {
@@ -197,7 +236,7 @@ export function createStore(directory, { secureRoot = protectRoot } = {}) {
         const index = state.accounts.findIndex((a) => a.uid === uid);
         if (index < 0) throw fail(404, "这个账号不存在。");
         state.accounts.splice(index, 1);
-        if (state.defaultUid === uid) state.defaultUid = state.accounts.find((a) => a.enabled !== false)?.uid ?? null;
+        if (state.defaultUid === uid) state.defaultUid = state.accounts.find(isAvailableAccount)?.uid ?? null;
       });
     },
   };

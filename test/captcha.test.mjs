@@ -306,53 +306,36 @@ test("截图回退使用 PNG 实际像素尺寸换算高 DPI 点选坐标", asyn
   assert.deepEqual(captchaActions(captured, { kind: "click", confidence: 0.9, points: [{ x: 240, y: 150 }] }).points, [{ x: 130, y: 110 }]);
 });
 
-test("人工回退只置前一次，保留官网控件，成功和关闭回调移除提示", async () => {
+test("历史验证码 SDK 工具确认成功与关闭，不添加人工提示或置前窗口", async () => {
   const widget = domWidget(), view = domPage([widget.root]), calls = [];
   view.TTGCaptcha = { render: (options) => { view.renderOptions = options; } };
   const browser = createCaptchaBrowser({ send: async (method, params) => {
     calls.push(method);
     if (method === "Runtime.evaluate") return { result: { value: evaluateDom(params.expression, view) } };
-    if (method === "Browser.getWindowForTarget") return { windowId: 7, bounds: { windowState: "minimized" } };
-    if (method === "Browser.setWindowBounds") assert.deepEqual(params, { windowId: 7, bounds: { windowState: "normal" } });
     return {};
   } });
   const decision = { type: "verify", subtype: "slide" };
   assert.equal(await browser.show(decision), true);
   assert.equal(view.renderOptions.verify_data, JSON.stringify(decision));
-  const controller = createCaptchaController();
-  await controller.requestManual({ captcha: browser });
-  await controller.requestManual({ captcha: browser });
-  assert.equal(calls.filter((method) => method === "Page.bringToFront").length, 1);
-  assert.equal(view.notices.length, 1);
-  assert.match(view.notices[0].textContent, /需要人工验证/);
-  assert.match(view.notices[0].style.cssText, /pointer-events:none/);
   assert.equal(widget.root.children.length, 4);
   view.renderOptions.captchaOptions.successCb();
   assert.equal(await browser.passed(), true);
-  assert.equal(view.notices.length, 0);
   await browser.show(decision);
-  await browser.requestManual();
   view.renderOptions.secondVerifyWebOptions.closeCallBack();
   assert.equal((await browser.outcome()).closed, true);
   assert.equal(view.notices.length, 0);
+  assert(!calls.includes("Page.bringToFront"));
+  assert(!calls.includes("Browser.setWindowBounds"));
 });
 
-test("交给人工后不再截取图片或自动点击，等待官网确认后继续", async () => {
-  let captures = 0, solves = 0, prompts = 0, passed = false;
+test("历史识别工具失败时不触发人工提示", async () => {
+  let prompts = 0;
   const browser = { captcha: {
-    capture: async () => { captures++; return challenge; },
-    describe: async () => passed ? null : challenge,
-    passed: async () => passed,
+    capture: async () => ({ kind: "unsupported", signature: "unsupported" }),
     requestManual: async () => { prompts++; },
   } };
-  const controller = createCaptchaController({ solver: { solve: async () => { solves++; throw Object.assign(Error("识别不可靠"), { code: "captcha_uncertain" }); } } });
-  assert.equal((await controller.inspect(browser)).state, "manual");
-  await controller.requestManual(browser);
+  const controller = createCaptchaController();
   await controller.inspect(browser);
-  await controller.requestManual(browser);
-  assert.equal(captures, 1);
-  assert.equal(solves, 1);
-  assert.equal(prompts, 1);
-  passed = true;
-  assert.equal((await controller.inspect(browser)).solved, true);
+  await controller.inspect(browser);
+  assert.equal(prompts, 0);
 });

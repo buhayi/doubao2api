@@ -559,6 +559,8 @@ select:focus-visible {
 .metric-icon.emerald { background: var(--success-soft); color: var(--success); }
 .metric-icon.amber { background: var(--warning-soft); color: var(--warning); }
 .metric-icon.slate { background: var(--bg-muted); color: var(--text-muted); }
+.metric-icon.danger { background: var(--danger-soft); color: var(--danger); }
+.metric-danger .metric-value { color: var(--danger); }
 
 .metric-value {
   font-size: 28px;
@@ -614,6 +616,7 @@ select:focus-visible {
 .tabs {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 4px;
   border-radius: 10px;

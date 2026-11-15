@@ -6,6 +6,7 @@ import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { createApi, fail } from "../protocol.mjs";
 import { createCompletion } from "../completion.mjs";
 import { createHistoryCleaner } from "./history.mjs";
+import { beginAccountOperation, failedAccountHealth, isUpstreamFailure } from "./account-health.mjs";
 import { validateApiKey } from "./config.mjs";
 import { inputTokens, validateRequest } from "./compat.mjs";
 import { createResponseStore, normalizeResponses, adaptResponses, responsesErrorFrame } from "./responses.mjs";
@@ -102,7 +103,6 @@ function cors(req, res, allowed) {
 export function createGateway({
   store, apiKey, api = createApi(), accountId, corsOrigins = [], promptTools = true, hideHistory = true,
   timeoutMs = 120000, maxConcurrency = 3, heartbeatMs = 15000,
-  captchaManualTimeoutMs = 300000,
   responseCache = {}, historyCleanup = {},
 } = {}) {
   const expectedKey = digest(validateApiKey(apiKey));
@@ -114,25 +114,9 @@ export function createGateway({
   const server = createServer(async (req, res) => {
     const disconnected = new AbortController();
     const timeout = new AbortController();
-    let timer;
-    const armTimeout = (ms, message) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => timeout.abort(fail(504, message)), ms);
-      timer.unref();
-    };
-    armTimeout(timeoutMs, "请求超时；网关不会自动重试，以免重复消耗额度。");
+    const timer = setTimeout(() => timeout.abort(fail(504, "请求超时；网关不会自动重试，以免重复消耗额度。")), timeoutMs);
+    timer.unref();
     const signal = AbortSignal.any([disconnected.signal, timeout.signal, shutdown.signal]);
-    let waitingForHuman = false;
-    const onVerification = (verification) => {
-      if (signal.aborted || res.destroyed || res.writableEnded) return;
-      if (verification?.state === "manual" && !waitingForHuman && Number.isSafeInteger(verification.expiresAt)) {
-        waitingForHuman = true;
-        armTimeout(Math.max(1, Math.min(captchaManualTimeoutMs, verification.expiresAt-Date.now())), "人工验证等待已超时，请重新发起请求。");
-      } else if (waitingForHuman && ["verifying", "verified", "failed", "expired", "cancelled"].includes(verification?.state)) {
-        waitingForHuman = false;
-        armTimeout(timeoutMs, "请求超时；网关不会自动重试，以免重复消耗额度。");
-      }
-    };
     const abort = () => { if (!res.writableFinished) disconnected.abort(); };
     req.once("aborted", abort);
     req.on("error", abort); // IncomingMessage may emit an error after an interrupted upload.
@@ -142,6 +126,13 @@ export function createGateway({
     const requestId = "req_" + randomUUID().replaceAll("-", "");
     res.setHeader("X-Request-ID", requestId);
     let uid, heartbeat, protocol = "chat";
+    let selectedAccount, startedAt, upstreamStarted = false, failureRecorded = false;
+    const recordAccountFailure = async (error) => {
+      if (!selectedAccount || !upstreamStarted || failureRecorded || signal.aborted || !isUpstreamFailure(error) || !store.recordHealth) return;
+      failureRecorded = true;
+      try { await store.recordHealth(selectedAccount, failedAccountHealth(error, { source: "request", startedAt })); }
+      catch { console.warn("账号失效状态未能保存，请检查本地账号文件和写入锁。"); }
+    };
     const streamState = { sequence: 0 };
     try {
       if (!req.url?.startsWith("/") || req.url.startsWith("//")) throw fail(400, "请求地址格式不正确。");
@@ -190,16 +181,23 @@ export function createGateway({
         } else body = validateBody(originalBody);
       }
       const account = await store.account(accountId);
+      selectedAccount = account;
+      startedAt = beginAccountOperation();
       if (signal.aborted) throw signal.reason;
       if (previous && previous.uid !== account.uid) throw fail(409, "默认账号已切换，请发送完整 input 历史开始新对话，或切回原账号续接。");
       if (path === "/v1/messages/count_tokens") {
-        const catalog = await api.catalog(account.secret, { signal, onVerification });
+        upstreamStarted = true;
+        const catalog = await api.catalog(account.secret, { signal });
         if (!Object.hasOwn(catalog.models, body.model)) throw fail(404, "该账号当前模型目录没有这个模型，请刷新目录后重选。");
         return json(res, 200, { input_tokens: inputTokens(body) });
       }
-      if (path === "/v1/usage") return json(res, 200, await api.usage(account.secret, { signal, onVerification }));
+      if (path === "/v1/usage") {
+        upstreamStarted = true;
+        return json(res, 200, await api.usage(account.secret, { signal }));
+      }
       if (method === "GET") {
-        const catalog = await api.catalog(account.secret, { signal, onVerification });
+        upstreamStarted = true;
+        const catalog = await api.catalog(account.secret, { signal });
         const models = Object.values(catalog.models).map((model) => ({
           id: model.id, object: "model", created: 0, owned_by: "doubaowork", name: model.name,
         }));
@@ -234,7 +232,8 @@ export function createGateway({
       }
       let historyOutcome = hideHistory ? "auto-cleanup" : "retained";
       res.setHeader("X-Doubao-History", historyOutcome);
-      let response = await createCompletion(api, account.secret, body, { signal, promptTools, idleMs: timeoutMs, onVerification,
+      upstreamStarted = true;
+      let response = await createCompletion(api, account.secret, body, { signal, promptTools, idleMs: timeoutMs, onError: recordAccountFailure,
         cleanupConversation: hideHistory ? async (conversation) => {
           historyOutcome = await history.clean(account.secret, conversation);
           return historyOutcome;
@@ -257,6 +256,7 @@ export function createGateway({
       if (response.body) await pipeline(Readable.fromWeb(response.body), res, { signal });
       else res.end();
     } catch (error) {
+      await recordAccountFailure(error);
       if (disconnected.signal.aborted || shutdown.signal.aborted) { if (!res.destroyed) res.destroy(); }
       else if (res.headersSent) {
         // Heartbeats may already have committed HTTP 200 before an upstream error or timeout.
