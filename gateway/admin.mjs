@@ -89,7 +89,7 @@ function usageView(usage) {
   };
 }
 
-export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus } = {}) {
+export function createAdmin({ store, api = createApi(), apiKey, config = {}, loginFactory = createLoginManager, health, historyStatus, clientVerification } = {}) {
   if (!store) throw Error("需要提供管理台账号存储。");
   const connection = baseUrl(config.host || "127.0.0.1", config.port || 8787);
   const token = randomBytes(32).toString("hex");
@@ -99,6 +99,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
   const checking = new Map();
   const probing = new Map();
   const probeHistory = createHistoryCleaner({ api });
+  const deleteHistory = config.deleteHistory ?? config.hideHistory ?? true;
+  const verification = config.edition === "work-client" ? clientVerification : null;
   const checkVersions = new Map();
   let checkVersion = 0;
   let job = null;
@@ -126,7 +128,7 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
   }
   function startLogin(options) {
     if (job?.active) throw fail(409, "已有登录流程，请先完成或取消当前登录。");
-    if (options.browser && !["auto", "edge", "chrome", "doubao", "chromium"].includes(options.browser)) throw fail(400, "不支持这个浏览器。");
+    if (options.browser && !["auto", "edge", "chrome", "doubao", "doubaowork", "chromium"].includes(options.browser)) throw fail(400, "不支持这个浏览器。");
     if (options.transport && !["pipe", "port"].includes(options.transport)) throw fail(400, "不支持这个浏览器连接方式。");
     const current = { id: randomBytes(12).toString("hex"), state: "starting", active: true, controller: new AbortController() };
     job = current;
@@ -136,13 +138,15 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       try {
         await store.list();
         if (signal.aborted) throw fail(499, "登录已取消。");
-        manager = loginFactory({ root: store.root, api, standalone: true });
-        current.flow = await manager.start({ browserId: options.browser === "auto" ? undefined : options.browser, transport: options.transport || "pipe", signal });
+        manager = loginFactory({ root: store.root, api, standalone: true, browserEnv: { ...process.env, ...config.clientPaths } });
+        const selectedBrowser = options.browser || config.defaultBrowser;
+        current.flow = await manager.start({ browserId: selectedBrowser === "auto" ? undefined : selectedBrowser, transport: options.transport || "pipe", signal });
         current.state = "waiting";
         const result = await current.flow.callback(undefined, { signal });
         if (signal.aborted) throw fail(499, "登录已取消。");
         if (result?.type !== "success") throw fail(409, result?.error || "登录未完成，请重新发起。");
         current.result = await store.save(result);
+        verification?.verified(current.result.uid);
         checks.delete(current.result.uid);
         checkVersions.delete(current.result.uid);
         current.state = "success";
@@ -171,12 +175,16 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         result = { state: "ok", checkedAt: Date.now(), updatedAt: account.updatedAt };
         try { result.usage = usageView(await api.usage(account.secret, { signal })); }
         catch (error) {
+          if (error?.localRateLimit) throw error;
+          await verification?.handle(account, error, { signal });
           const view = errorView(error);
           result.usageError = view.error.message;
           result.state = failedAccountHealth(error, { source: "check", startedAt }).state;
           result.message = view.error.message;
         }
       } catch (error) {
+        if (error?.localRateLimit) throw error;
+        await verification?.handle(account, error, { signal });
         const view = errorView(error);
         result = { state: view.error.code === "session_expired" ? "expired" : view.error.code === "rate_limited" ? "limited" : view.error.code === "verification_required" ? "verification" : "error", message: view.error.message, checkedAt: Date.now(), updatedAt: account.updatedAt };
       }
@@ -208,17 +216,20 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
         const response = await createCompletion(api, account.secret, {
           model: selected[0], messages: [{ role: "user", content: "hi" }], stream: false,
         }, { signal, promptTools: false, idleMs: 60000,
-          cleanupConversation: config.hideHistory !== false ? (conversation) => conversation.conversationId
+          cleanupConversation: deleteHistory ? (conversation) => conversation.conversationId
             ? probeHistory.clean(account.secret, conversation) : undefined : undefined,
         });
         await response.json();
         result = { state: "ok", source: "probe", startedAt, checkedAt: Date.now() };
       } catch (error) {
         if (signal.aborted) throw signal.reason;
+        if (error?.localRateLimit) throw error;
+        await verification?.handle(account, error, { signal });
         result = failedAccountHealth(error, { source: "probe", startedAt });
       }
       if (signal.aborted) throw signal.reason;
       await store.recordHealth(account, result);
+      if (result.state === "ok") verification?.verified(account.uid);
       const { startedAt: internalTime, ...publicResult } = result;
       return { ...publicResult, updatedAt: account.updatedAt };
     })();
@@ -246,6 +257,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       return { ...account, check };
     });
     return { accounts, gateway: { online, baseUrl: connection, fixedAccountId: config.accountId || null,
+      edition: config.edition || "gateway", defaultBrowser: config.defaultBrowser || "auto",
+      ...(verification ? { clientVerification: verification.status() } : {}),
     }, login: loginStatus() };
   }
 
@@ -285,11 +298,14 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       if (path === "/api/overview" && req.method === "GET") return send(res, 200, await overview(signal));
       if (path === "/api/settings" && req.method === "GET") return send(res, 200, {
         baseUrl: connection, adminPort: server.address().port, dataDir: store.root,
+        edition: config.edition || "gateway", defaultBrowser: config.defaultBrowser || "auto",
         timeoutMs: config.timeoutMs || 120000, maxConcurrency: config.maxConcurrency || 3,
+        upstreamRequests: api.requestStatus?.() || null,
         promptTools: config.promptTools !== false, fixedAccountId: config.accountId || null,
-        hideHistory: config.hideHistory !== false, historyCleanup: historyStatus?.() || null,
+        invisibleSend: true, deleteHistory, hideHistory: deleteHistory, historyCleanup: historyStatus?.() || null,
         captcha: { enabled: false, mode: "disabled", automatic: false, manualFallback: false,
           message: "遇到官网人机验证时返回验证错误。" },
+        ...(verification ? { clientVerification: verification.status() } : {}),
         protocols: protocolOptions(connection),
       });
       if (path === "/api/key" && req.method === "POST") {
@@ -321,6 +337,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
           let catalog;
           try { catalog = await api.catalog(account.secret, { signal, force: true }); }
           catch (error) {
+            if (error?.localRateLimit) throw error;
+            await verification?.handle(account, error, { signal });
             if (!signal.aborted) await store.recordHealth(account, failedAccountHealth(error, { source: "request", startedAt }));
             throw error;
           }
@@ -340,6 +358,8 @@ export function createAdmin({ store, api = createApi(), apiKey, config = {}, log
       else if (!res.headersSent) {
         req.resume();
         const view = errorView(signal.aborted ? fail(504, "操作超时，请稍后重试。") : error);
+        if (Number.isSafeInteger(error?.retryAfterSeconds) && error.retryAfterSeconds > 0)
+          res.setHeader("Retry-After", String(error.retryAfterSeconds));
         send(res, view.status, { error: view.error });
       } else res.destroy();
     } finally {

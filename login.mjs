@@ -3,7 +3,8 @@ import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { BrowserLogin, sessionIdentity } from "./browser-login.mjs";
+import { BrowserLogin, sessionIdentity, availableBrowsers } from "./browser-login.mjs";
+import { homedir } from "node:os";
 import { credentials, saveAuth, deviceMetadata, fail } from "./protocol.mjs";
 const page = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>豆包工作 · Magpie 账号登录</title><link rel="stylesheet" href="style.css"><main><div class="brand"><img src="avatar.png" alt="豆包工作"><span>豆包工作 <small>MAGPIE · 独立登录</small></span></div><span class="eyebrow">每个账号，单独一个会话</span><h1>在独立浏览器中登录</h1><p>已为你打开新的独立浏览器窗口，请在那里完成豆包登录和官网验证，完成后再回到本页确认接入。日常浏览器中的账号保持原样。</p><ol><li>在新窗口扫码或输入手机验证码</li><li>如官网提示验证，请由你本人完成</li><li>回到此页点击“接入 Magpie”，核验后保存账号</li></ol><section aria-live="polite"><b id="state">正在读取状态…</b><p id="message"></p></section><p class="note">登录快照保存在 Magpie 的私有账号库，不依赖外置反代。不要发送 Cookie 或验证码给他人。</p><button id="confirm" type="button" hidden>接入 Magpie</button><button id="cancel" type="button">取消本次登录</button></main><script src="flow.js" defer></script></html>`;
 const css = `:root{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:#243145;background:#f5f7fa}*{box-sizing:border-box}body{margin:0;padding:40px 18px}main{max-width:520px;margin:auto;padding:32px;background:#fff;border:1px solid #e5eaf2;border-radius:18px}.brand{display:flex;gap:12px;align-items:center;margin-bottom:32px;font-weight:650;font-size:18px}.brand img{width:46px;height:46px;border-radius:12px;object-fit:cover}.brand small{display:block;font-size:9px;color:#7b889d;letter-spacing:.12em;margin-top:5px}.eyebrow{font-size:11px;color:#667489}h1{font-size:26px;letter-spacing:-.03em}p,li{font-size:13px;color:#667489;line-height:1.9}ol{padding-left:20px;margin:24px 0}section{background:#edf3ff;border:1px solid #d9e5fc;border-radius:11px;padding:17px;color:#3465cb}section p{margin:8px 0 0;font-size:12px}.note{font-size:11px;margin:22px 0}button{padding:11px 16px;background:#fff;color:#243145;border:1px solid #e5eaf2;border-radius:8px;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible{outline:3px solid #3465cb;outline-offset:3px}@media(prefers-color-scheme:dark){:root{background:#161d29;color:#e4eaf2}main{background:#1d2634;border-color:#303c4f}section{background:#233653;border-color:#385276;color:#a4c0ff}p,li{color:#a2b0c4}button{background:#1d2634;color:#e4eaf2;border-color:#303c4f}}`;
@@ -15,6 +16,7 @@ export function createLoginManager({
   Browser = BrowserLogin,
   metadata = deviceMetadata,
   standalone = false,
+  browserEnv,
 } = {}) {
   const label = (text) => standalone ? text.replaceAll("MAGPIE", "GATEWAY").replaceAll("Magpie", "网关").replaceAll("接入 网关", "接入网关") : text;
   const loginPage = standalone
@@ -43,6 +45,7 @@ export function createLoginManager({
         await mkdir(root, { recursive: true, mode: 0o700 });
         browser = new Browser({
           tmpRoot: join(root, "tmp"),
+          ...(browserEnv ? { discover: () => availableBrowsers(process.platform, homedir(), browserEnv) } : {}),
           async importAccount(cookies, { identity = {} } = {}) {
             // The browser session's own identifiers win; cookies and the
             // desktop client's Local State only fill gaps.

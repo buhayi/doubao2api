@@ -105,6 +105,22 @@ test("请求只发官方固定路径，重定向与网络异常不泄漏凭据",
     (e) => !e.message.includes("FIXTURE_SESSION"),
   );
 });
+
+test("IM 删除和回查使用上游要求的 JSON 编码，业务错误保留分类", async () => {
+  const api = createApi({ fetchImpl: async (url, init) => {
+    const im = new URL(url).pathname.startsWith("/im/");
+    if (im && init.headers.get("content-type") !== "application/json; encoding=utf-8")
+      return Response.json({ status_code: 712012002, status_desc: "不支持编码类型" });
+    if (!im) assert.equal(init.headers.get("content-type"), "application/json");
+    return Response.json(im ? { status_code: 0 } : { code: 0 });
+  } });
+  for (const path of ["/im/conversation/batch_del_user_conv", "/im/conversation/batch_get"])
+    assert.equal((await api.post(secret, path, {})).status_code, 0);
+  assert.equal((await api.post(secret, "/alice/user/launch", {})).code, 0);
+  const failed = createApi({ fetchImpl: async () => Response.json({ status_code: 712012002, status_desc: "不支持编码类型" }) });
+  await assert.rejects(failed.post(secret, "/im/conversation/batch_get", {}),
+    (error) => error.status === 502 && error.reason === "upstream_error" && error.upstreamCode === 712012002);
+});
 test("额度未知时不伪造百分比，按奖励额度实际剩余显示", () => {
   const v = quotaView({
     data: {

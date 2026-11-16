@@ -34,12 +34,12 @@ test("Windows 从 64 位和 32 位安装目录、用户目录及 App Paths 发�
   };
   const scan = () => availableBrowsers("win32", "D:\\用户", env, deps);
   assert.deepEqual((await scan()).map(({ path }) => path), [chrome, edge]);
-  assert.equal(registryCalls, 0);
+  assert.equal(registryCalls, 1); // Work may be installed at a custom location.
   installed.clear();
   installed.add(userEdge);
   installed.add(registered);
   assert.deepEqual((await scan()).map(({ path }) => path), [registered, userEdge]);
-  assert.equal(registryCalls, 1);
+  assert.equal(registryCalls, 2);
 });
 
 test("Windows 忽略相对路径、网络共享和 App Paths 中带参数的项", async () => {

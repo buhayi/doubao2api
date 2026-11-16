@@ -21,6 +21,8 @@ const frame = (name, v) => `event: ${name}\ndata: ${JSON.stringify(v)}\n\n`;
 test("请求保留完整角色历史，每次新会话；只使用云运行环境，不挂本机目录", () => {
   const { payload } = buildRequest("BOT", model, body);
   assert.equal(payload.client_meta.bot_id, "BOT");
+  assert.equal(payload.messages[0].message_status, 1);
+  assert.equal(payload.option.message_storage_type, 0);
   assert.equal(payload.option.model_config.model_item_key, "flash");
   assert.equal(payload.option.general_task_param.runtime_type, 2);
   assert.deepEqual(

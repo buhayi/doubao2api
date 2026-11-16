@@ -126,7 +126,7 @@ GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/m
 
 为避免把未知参数写成官方规格，未下发上下文信息时使用保守默认值：上下文 `32768`、输出 `4096`。这些是插件配置值，不是模型真实容量认证。未编造 token 用量或价格。输出值是客户端模型元数据，并非上游硬性生成长度控制；`max_tokens`、`temperature` 等采样参数尚未映射到豆包请求。
 
-本插件将对话、系统指令与工具声明交给豆包工作处理；请只发送准备交给该服务的内容。豆包端可能留存这些新会话，适用该服务自己的数据政策。
+本插件以不可见用户消息发送对话、系统指令和工具声明，默认在回复完成、取消或超时后删除本次上游会话。删除失败会记录提示，回答仍正常交付。
 
 ## 插件选项
 
@@ -134,9 +134,10 @@ GitHub：[245678000000/magpie-doubaowork-auth](https://github.com/245678000000/m
 
 - **本机随机端口兼容登录**：默认关闭，仅用于 Chrome++ 等丢失管道的启动器，详见上文。
 - **实验性客户端工具桥**：默认开启。纯文本使用可关闭。带工具时先缓冲并校验完整回答，再交付客户端；文本请求仍逐块流式。
+- **回复后删除上游会话**：默认开启，清理本次请求新建并由上游确认的会话。
 
 
-高级启动参数可通过插件 JSON options 设置：`browser: "chrome" | "edge" | "chromium" | "doubao"`（`doubao` 仅 Windows 可用，其他平台会在登录开始时明确报错）、`contextLimit`、`outputLimit`。原生布尔开关由 Magpie 保存并实时读取。
+高级启动参数可通过插件 JSON options 设置：`browser: "chrome" | "edge" | "chromium" | "doubao" | "doubaowork"`（后两项仅 Windows 可用）、`contextLimit`、`outputLimit`。原生布尔开关由 Magpie 保存并实时读取。
 
 ## 会话与隐私
 

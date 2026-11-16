@@ -36,6 +36,7 @@ function errorView(error) {
     param: null,
     code,
     ...(Number.isSafeInteger(error?.upstreamCode) && error.upstreamCode > 0 ? { upstream_code: error.upstreamCode } : {}),
+    ...(Number.isSafeInteger(error?.retryAfterSeconds) && error.retryAfterSeconds > 0 ? { retry_after_seconds: error.retryAfterSeconds } : {}),
   } } };
 }
 function json(res, status, body) {
@@ -87,7 +88,7 @@ function cors(req, res, allowed) {
   if (origin !== undefined) {
     if (!allowed.includes("*") && !allowed.includes(origin)) throw fail(403, "浏览器来源未获授权，请配置 DW_CORS_ORIGINS。");
     res.setHeader("Access-Control-Allow-Origin", allowed.includes("*") ? "*" : origin);
-    res.setHeader("Access-Control-Expose-Headers", "X-Request-ID, Request-ID, X-Doubao-Usage, X-Doubao-History");
+    res.setHeader("Access-Control-Expose-Headers", "X-Request-ID, Request-ID, X-Doubao-Usage, X-Doubao-History, Retry-After");
     res.setHeader("Vary", "Origin");
   }
   if (req.method === "OPTIONS") {
@@ -101,9 +102,10 @@ function cors(req, res, allowed) {
   return false;
 }
 export function createGateway({
-  store, apiKey, api = createApi(), accountId, corsOrigins = [], promptTools = true, hideHistory = true,
+  store, apiKey, api = createApi(), accountId, corsOrigins = [], promptTools = true, hideHistory,
+  deleteHistory = hideHistory ?? true,
   timeoutMs = 120000, maxConcurrency = 3, heartbeatMs = 15000,
-  responseCache = {}, historyCleanup = {},
+  responseCache = {}, historyCleanup = {}, edition = "gateway", clientVerification,
 } = {}) {
   const expectedKey = digest(validateApiKey(apiKey));
   if (!store) throw Error("需要提供网关账号存储。");
@@ -111,6 +113,7 @@ export function createGateway({
   const active = new Map();
   const responses = createResponseStore(responseCache);
   const history = createHistoryCleaner({ api, ...historyCleanup });
+  const verification = edition === "work-client" ? clientVerification : null;
   const server = createServer(async (req, res) => {
     const disconnected = new AbortController();
     const timeout = new AbortController();
@@ -128,10 +131,15 @@ export function createGateway({
     let uid, heartbeat, protocol = "chat";
     let selectedAccount, startedAt, upstreamStarted = false, failureRecorded = false;
     const recordAccountFailure = async (error) => {
-      if (!selectedAccount || !upstreamStarted || failureRecorded || signal.aborted || !isUpstreamFailure(error) || !store.recordHealth) return;
+      if (!selectedAccount || !upstreamStarted || failureRecorded || signal.aborted || !isUpstreamFailure(error)) return;
       failureRecorded = true;
-      try { await store.recordHealth(selectedAccount, failedAccountHealth(error, { source: "request", startedAt })); }
-      catch { console.warn("账号失效状态未能保存，请检查本地账号文件和写入锁。"); }
+      // Persist the failure before a desktop helper waits for the window. New
+      // callers must stop selecting this account as soon as verification fails.
+      if (store.recordHealth) {
+        try { await store.recordHealth(selectedAccount, failedAccountHealth(error, { source: "request", startedAt })); }
+        catch { console.warn("账号失效状态未能保存，请检查本地账号文件和写入锁。"); }
+      }
+      await verification?.handle(selectedAccount, error, { signal });
     };
     const streamState = { sequence: 0 };
     try {
@@ -230,11 +238,11 @@ export function createGateway({
         }, heartbeatMs);
         heartbeat.unref();
       }
-      let historyOutcome = hideHistory ? "auto-cleanup" : "retained";
+      let historyOutcome = deleteHistory ? "auto-delete" : "retained";
       res.setHeader("X-Doubao-History", historyOutcome);
       upstreamStarted = true;
       let response = await createCompletion(api, account.secret, body, { signal, promptTools, idleMs: timeoutMs, onError: recordAccountFailure,
-        cleanupConversation: hideHistory ? async (conversation) => {
+        cleanupConversation: deleteHistory ? async (conversation) => {
           historyOutcome = await history.clean(account.secret, conversation);
           return historyOutcome;
         } : undefined,
@@ -271,6 +279,8 @@ export function createGateway({
       else {
         const view = errorView(timeout.signal.aborted ? timeout.signal.reason : error);
         if (view.body.error.code === "invalid_api_key") res.setHeader("WWW-Authenticate", "Bearer");
+        if (Number.isSafeInteger(error?.retryAfterSeconds) && error.retryAfterSeconds > 0)
+          res.setHeader("Retry-After", String(error.retryAfterSeconds));
         // Drain rejected uploads without buffering; closing before upload completion can hide the 413 from clients.
         req.resume();
         json(res, view.status, protocol === "anthropic" ? anthropicError(view, requestId) : view.body);
@@ -292,7 +302,7 @@ export function createGateway({
   server.keepAliveTimeout = 5000;
   let closing;
   return {
-    historyStatus: () => ({ enabled: hideHistory, ...history.status() }),
+    historyStatus: () => ({ enabled: deleteHistory, ...history.status() }),
     server,
     close() {
       return closing ??= (async () => {

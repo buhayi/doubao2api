@@ -90,6 +90,10 @@ export async function availableBrowsers(
         const file = windowsExecutable(raw, choice.exe);
         if (!file || seen.has(file.toLowerCase())) continue;
         seen.add(file.toLowerCase());
+        if (choice.id === "doubaowork") {
+          const runtime = winPath.join(winPath.dirname(file), "app", choice.exe);
+          if (await works(runtime)) return { id: choice.id, name: choice.name, path: runtime };
+        }
         if (await works(file))
           return { id: choice.id, name: choice.name, path: file };
       }
@@ -99,7 +103,7 @@ export async function availableBrowsers(
       windowsChoices.map((b) =>
         first(b, [
           envValue(env, b.env),
-          ...roots.map((root) => winPath.join(root, ...b.dir, b.exe)),
+          ...roots.flatMap((root) => [b.dir, ...(b.extraDirs || [])].map((dir) => winPath.join(root, ...dir, b.exe))),
         ]),
       ),
     );
@@ -184,7 +188,7 @@ export function browserArgs(profile, { blank = false, id = "", transport = "pipe
   // Doubao.exe is the desktop client; --saman-browser-entry is what turns it into
   // the embedded Chromium browser. Documented as best-effort: a vendor rename or
   // flag change makes the handshake fail loudly instead of silently reusing the app.
-  if (id === "doubao") args.unshift("--saman-browser-entry");
+  if (["doubao", "doubaowork"].includes(id)) args.unshift("--saman-browser-entry");
   return args;
 }
 
@@ -533,7 +537,7 @@ export class BrowserLogin {
   }
   async start(browserId, context = {}) {
     if (this.disposed) throw failure(503, "登录服务正在停止。");
-    if (browserId === "doubao" && this.platform !== "win32")
+    if (["doubao", "doubaowork"].includes(browserId) && this.platform !== "win32")
       throw failure(
         400,
         "豆包内置浏览器仅支持 Windows。请改用 Chrome / Edge，或在插件选项中恢复自动选择。",

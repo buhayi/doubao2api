@@ -493,6 +493,11 @@ select:focus-visible {
   margin-left: auto;
 }
 
+.verification-banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .info-banner.warning {
   background: var(--warning-soft);
   border-color: rgba(217, 119, 6, 0.24);
@@ -1633,4 +1638,16 @@ select:focus {
   }
 
   .mobile-hint { display: block; }
+
+  .verification-banner {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .verification-banner .button {
+    grid-column: 2;
+    justify-self: start;
+    margin-left: 0;
+  }
 }

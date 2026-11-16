@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { createApi, readAuth, PROVIDER, ORIGIN, fail } from "./protocol.mjs";
 import { createCompletion } from "./completion.mjs";
 import { createLoginManager } from "./login.mjs";
+import { createHistoryCleaner } from "./gateway/history.mjs";
 function errorResponse(error) {
   const status = Number(error?.status) || 502;
   const reason = [
@@ -109,6 +110,8 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
     return typeof value === "boolean" ? value : fallback;
   };
   const promptTools = () => flag("prompt_tools", options.promptTools !== false);
+  const deleteHistory = () => flag("delete_history", options.deleteHistory !== false);
+  const history = createHistoryCleaner({ api });
   const login = dependencies.login || createLoginManager({ root, api });
   return {
     config: async (cfg) => {
@@ -124,6 +127,12 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
       provider: PROVIDER,
       maxConcurrency: 1,
       options: [
+        {
+          key: "delete_history",
+          label: "回复后删除上游会话",
+          description: "文本按不可见消息发送；回复完成、取消或超时后删除本次上游会话。",
+          default: true,
+        },
         {
           key: "browser_loopback",
           label: "本机随机端口兼容登录",
@@ -147,7 +156,7 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
             return login.start({
               signal,
               transport: flag("browser_loopback", false) ? "port" : "pipe",
-              browserId: ["chrome", "edge", "doubao", "chromium"].includes(options.browser)
+              browserId: ["chrome", "edge", "doubao", "doubaowork", "chromium"].includes(options.browser)
                 ? options.browser
                 : undefined,
             });
@@ -192,6 +201,7 @@ function createHooks(input = {}, options = {}, dependencies = {}) {
               return await createCompletion(api, secret, body, {
                 signal: init.signal,
                 promptTools: promptTools(),
+                cleanupConversation: deleteHistory() ? (conversation) => history.clean(secret, conversation) : undefined,
               });
             } catch (e) {
               return errorResponse(e);

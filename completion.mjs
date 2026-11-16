@@ -163,7 +163,9 @@ export function buildRequest(bot, model, body, { promptTools = true } = {}) {
             append_fields: [],
           },
         ],
-        message_status: 0,
+        // Match the desktop client's SendInvisibleMsg / MessageStatus_INVISIBLE.
+        // Storage type 1 is TOOL_MESSAGE, not a privacy setting.
+        message_status: 1,
       },
     ],
     option: {
@@ -284,13 +286,20 @@ export async function createCompletion(
     } else if (!conversation.conversationId) conversation.conversationId = metadata.conversationId;
   };
   const cleanup = cleanupConversation ? () => cleanupTask ??= Promise.resolve().then(() => cleanupConversation({ ...conversation })).catch(() => {
-    console.warn("上游会话隐藏未完成，请检查历史列表和网关连接。");
+    console.warn("上游会话删除未完成，请检查历史列表和网关连接。");
     return "failed";
   }) : undefined;
   async function* events() {
     try {
       const response = await api.post(secret, "/chat/completion", payload, { signal: combined, stream: true });
-      yield* decodeEvents(response, { signal: combined, idleMs, onConversation: observe });
+      yield* decodeEvents(response, { signal: combined, idleMs, onConversation: observe,
+        onError: error => api.reportFailure?.(secret, error, response.headers.get("retry-after")),
+      });
+    } catch (error) {
+      // SSE can carry a limit/verification error after HTTP 200. Stop queued
+      // upstream work as well, before attempting any history cleanup.
+      api.reportFailure?.(secret, error);
+      throw error;
     } finally { await cleanup?.(); }
   }
   const iterator = events()[Symbol.asyncIterator]();

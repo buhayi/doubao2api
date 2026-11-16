@@ -35,6 +35,15 @@ export const windowsChoices = [
     dir: ["Doubao", "Application", "app"],
     env: "DW_DOUBAO_BIN",
   },
+  {
+    id: "doubaowork",
+    name: "豆包工作客户端",
+    exe: "DoubaoWork.exe",
+    dir: ["DoubaoWork", "Application", "app"],
+    extraDirs: [["DoubaoWork", "app"]],
+    env: "DW_DOUBAO_WORK_BIN",
+    appPaths: true,
+  },
 ];
 
 function localPath(value) {
@@ -81,7 +90,7 @@ export async function readWindowsAppPaths(env = process.env) {
 $ErrorActionPreference = 'Stop'
 $PSModuleAutoLoadingPreference = 'None'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-foreach ($entry in @('chrome.exe','msedge.exe')) {
+foreach ($entry in @('chrome.exe','msedge.exe','DoubaoWork.exe')) {
   foreach ($hive in @('CurrentUser','LocalMachine')) {
     foreach ($view in @('Registry64','Registry32')) {
       $base = $null; $key = $null
@@ -100,12 +109,56 @@ foreach ($entry in @('chrome.exe','msedge.exe')) {
       }
     }
   }
-}`;
+}
+# Work's updater entry can become stale after a move. Read the existing Start
+# Menu shortcut too; never execute a launcher or change its shortcut.
+foreach ($entry in @('SOFTWARE\DoubaoWork','SOFTWARE\Bytedance\DoubaoWork','SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\DoubaoWork')) {
+  $key = $null
+  try {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($entry)
+    if ($null -ne $key) {
+      foreach ($name in @('InstallDir','InstallLocation')) {
+        $value = $key.GetValue($name)
+        if ($value -is [string] -and $value.Length -gt 0) {
+          $file = [IO.Path]::Combine($value,'app','DoubaoWork.exe')
+          [Console]::WriteLine('DoubaoWork.exe:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($file)))
+        }
+      }
+    }
+  } catch {} finally { if ($null -ne $key) { $key.Dispose() } }
+}
+$shell = $null
+try {
+  $workName = [string][char]0x8c46 + [char]0x5305 + [char]0x5de5 + [char]0x4f5c
+  foreach ($root in @([Environment]::GetFolderPath('Programs'),[Environment]::GetFolderPath('CommonPrograms'),[Environment]::GetFolderPath('DesktopDirectory'),[Environment]::GetFolderPath('CommonDesktopDirectory'))) {
+    foreach ($folder in @('', 'DoubaoWork', $workName)) {
+      foreach ($name in @('DoubaoWork.lnk',($workName + '.lnk'))) {
+        $file = [IO.Path]::Combine($root,$folder,$name)
+        if ([IO.File]::Exists($file)) {
+          if ($null -eq $shell) { $shell = [Activator]::CreateInstance([Type]::GetTypeFromProgID('WScript.Shell')) }
+          $shortcut = $shell.CreateShortcut($file)
+          [Console]::WriteLine('DoubaoWork.exe:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($shortcut.TargetPath)))
+        }
+      }
+    }
+  }
+} catch {} finally { if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } }
+# A moved installation may have no valid registered path or shortcut. The
+# current session's running client still supplies an exact executable path.
+foreach ($clientProcess in [Diagnostics.Process]::GetProcessesByName('DoubaoWork')) {
+  try {
+    if ($clientProcess.SessionId -eq [Diagnostics.Process]::GetCurrentProcess().SessionId) {
+      $file = $clientProcess.MainModule.FileName
+      [Console]::WriteLine('DoubaoWork.exe:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($file)))
+    }
+  } catch {} finally { $clientProcess.Dispose() }
+}
+`;
   const output = await powershell(script, env).catch(() => "");
-  const result = { chrome: [], edge: [] };
+  const result = { chrome: [], edge: [], doubaowork: [] };
   for (const line of output.split(/\r?\n/)) {
-    const m = /^(chrome|msedge)\.exe:([A-Za-z0-9+/]+={0,2})$/.exec(line);
-    if (m) result[m[1] === "chrome" ? "chrome" : "edge"].push(Buffer.from(m[2], "base64").toString("utf8"));
+    const m = /^(chrome|msedge|DoubaoWork)\.exe:([A-Za-z0-9+/]+={0,2})$/.exec(line);
+    if (m) result[m[1] === "chrome" ? "chrome" : m[1] === "msedge" ? "edge" : "doubaowork"].push(Buffer.from(m[2], "base64").toString("utf8"));
   }
   return result;
 }

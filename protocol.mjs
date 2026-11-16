@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { createRequestScheduler, retryAfterMilliseconds, scheduledResponse } from "./request-scheduler.mjs";
 export const ORIGIN = "https://www.doubao.com";
 export const PROVIDER = "doubaowork-direct";
 export const fail = (status, message) =>
@@ -119,9 +120,12 @@ export function readAuth(auth) {
 }
 export const credentialKey = (s) =>
   createHash("sha256").update(s.cookieHeader).digest("hex");
+const requestAccountKey = s => s.userId
+  ? createHash("sha256").update(JSON.stringify([s.userId, s.enterpriseType || "0"])).digest("hex")
+  : credentialKey(s);
 export function endpoint(secret, path) {
   if (
-    !/^\/(?:alice\/|chat\/completion$)/.test(path) ||
+    !/^\/(?:alice\/|chat\/completion$|im\/conversation\/(?:batch_del_user_conv|batch_get)$)/.test(path) ||
     path.includes("?") ||
     path.includes("#") ||
     path.includes("..")
@@ -166,14 +170,14 @@ export function vendorError(status, value = {}) {
       ? value.error
       : value;
   const code = Number(
-      detail?.code ?? detail?.error_code ?? value?.code ?? value?.error_code,
+      detail?.code ?? detail?.error_code ?? detail?.status_code ?? value?.code ?? value?.error_code ?? value?.status_code,
     ),
     message = str(
       detail?.error_msg ||
         detail?.message ||
         detail?.msg ||
         value?.error_msg ||
-        value?.message,
+        value?.message || value?.status_desc,
     ).toLowerCase();
   let decision =
     value?.extra?.decision ?? value?.decision ?? detail?.extra?.decision;
@@ -478,10 +482,91 @@ export function quotaView(value, entry = {}) {
     "";
   return { ...(plan ? { plan: clean(plan) } : {}), windows };
 }
-export function createApi({ fetchImpl = fetch } = {}) {
-  const cache = new Map(),
-    pending = new Map();
-  const headers = (s) =>
+// A cancelled reader leaves shared metadata available to other readers. The
+// upstream task is cancelled only after its last waiting reader disconnects.
+function metadataCache(ttlMs, now) {
+  const values = new Map(), pending = new Map();
+  return async (key, load, { signal, force = false } = {}) => {
+    if (signal?.aborted) throw fail(499, "请求已取消。");
+    const old = values.get(key);
+    if (!force && old && now() - old.at < ttlMs) return old.value;
+    let entry = pending.get(key);
+    if (entry?.controller.signal.aborted) { pending.delete(key); entry = null; }
+    if (!entry) {
+      entry = { controller: new AbortController(), readers: 0, settled: false };
+      pending.set(key, entry);
+      const current = entry;
+      entry.promise = Promise.resolve().then(() => load(current.controller.signal)).then(value => {
+        if (!current.controller.signal.aborted && ttlMs > 0) {
+          if (values.size >= 64 && !values.has(key)) values.delete(values.keys().next().value);
+          values.set(key, { at: now(), value });
+        }
+        return value;
+      }).finally(() => {
+        current.settled = true;
+        if (pending.get(key) === current) pending.delete(key);
+      });
+      void entry.promise.catch(() => {});
+    }
+    entry.readers++;
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = callback => value => {
+        if (done) return;
+        done = true;
+        signal?.removeEventListener("abort", abort);
+        if (--entry.readers === 0 && !entry.settled) entry.controller.abort();
+        callback(value);
+      };
+      const abort = () => finish(reject)(fail(499, "请求已取消。"));
+      signal?.addEventListener("abort", abort, { once: true });
+      entry.promise.then(finish(resolve), finish(reject));
+      if (signal?.aborted) abort();
+    });
+  };
+}
+
+export function createApi({
+  fetchImpl = fetch, minIntervalMs = 1000, maxQueuedRequests = 16,
+  rateLimitCooldownMs = 60000, usageTtlMs = 30000, now = Date.now,
+} = {}) {
+  if (!Number.isInteger(rateLimitCooldownMs) || rateLimitCooldownMs < 1000 || rateLimitCooldownMs > 900000)
+    throw Error("限流冷却必须是 1000–900000 毫秒的整数。");
+  if (!Number.isInteger(usageTtlMs) || usageTtlMs < 0 || usageTtlMs > 300000)
+    throw Error("额度缓存时间必须是 0–300000 毫秒的整数。");
+  const scheduler = createRequestScheduler({ minIntervalMs, maxQueuedRequests, now });
+  const cachedCatalog = metadataCache(300000, now), cachedUsage = metadataCache(usageTtlMs, now);
+  const reportedFailures = new WeakSet();
+  function reportFailure(s, error, retryAfterMs) {
+    if (!error || !["rate_limited", "verification_required"].includes(error.reason)
+      || error.localRateLimit || error.upstreamCooldown || reportedFailures.has(error)) return;
+    reportedFailures.add(error);
+    const key = requestAccountKey(s);
+    if (error?.reason === "rate_limited") {
+      if (typeof retryAfterMs === "string") retryAfterMs = retryAfterMilliseconds(retryAfterMs, now());
+      const duration = Math.max(1000, retryAfterMs ?? rateLimitCooldownMs);
+      error.retryAfterSeconds = Math.max(1, Math.ceil(duration / 1000));
+      scheduler.cooldown(key, duration, error);
+    } else if (error?.reason === "verification_required") scheduler.cancelPending(key, error);
+  }
+  async function lease(s, signal, stream = false, cleanup = false) {
+    const deadline = AbortSignal.timeout(stream ? 600000 : 25000);
+    const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    try { return { release: await scheduler.acquire(requestAccountKey(s), { signal: combined, cleanup }), signal: combined }; }
+    catch (error) {
+      if (signal?.aborted) throw fail(499, "请求已取消。");
+      if (deadline.aborted) throw Object.assign(fail(504, "等待上游请求超时，请稍后重试。"), { localRateLimit: true });
+      throw error;
+    }
+  }
+  async function readJSON(response) {
+    try { return await jsonLimited(response); }
+    catch (error) {
+      if ([401, 429].includes(response.status)) throw vendorError(response.status);
+      throw error;
+    }
+  }
+  const headers = (s, path = "") =>
     new Headers({
       Cookie: s.cookieHeader,
       Origin: ORIGIN,
@@ -490,48 +575,44 @@ export function createApi({ fetchImpl = fetch } = {}) {
         s.userAgent ||
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
       "Agw-Js-Conv": "str",
-      "Content-Type": "application/json",
+      // IM selects its decoder from this explicit encoding parameter.
+      "Content-Type": path.startsWith("/im/")
+        ? "application/json; encoding=utf-8"
+        : "application/json",
     });
   async function request(s, path, body, { signal, stream = false } = {}) {
-    let response;
+    // Validate before admission so malformed requests neither consume a slot
+    // nor affect the account's next allowed request time.
+    const url = endpoint(s, path), encoded = JSON.stringify(body), requestHeaders = headers(s, path);
+    const slot = await lease(s, signal, stream, path === "/im/conversation/batch_del_user_conv");
+    let response, handedOff = false;
     try {
-      response = await fetchImpl(endpoint(s, path), {
-        method: "POST",
-        redirect: "error",
-        headers: headers(s),
-        body: JSON.stringify(body),
-        signal: signal
-          ? AbortSignal.any([
-              signal,
-              AbortSignal.timeout(stream ? 10 * 60_000 : 25000),
-            ])
-          : AbortSignal.timeout(stream ? 10 * 60_000 : 25000),
-      });
-    } catch (e) {
-      if (signal?.aborted) throw fail(499, "请求已取消。");
-      throw fail(502, "豆包工作网络请求未完成，请检查连接后再试。");
-    }
-    if (
-      stream &&
-      response.ok &&
-      response.headers.get("content-type")?.startsWith("text/event-stream")
-    )
-      return response;
-    let value;
-    try {
-      value = await jsonLimited(response);
+      try {
+        response = await fetchImpl(url, {
+          method: "POST", redirect: "error", headers: requestHeaders, body: encoded, signal: slot.signal,
+        });
+      } catch {
+        if (signal?.aborted) throw fail(499, "请求已取消。");
+        throw fail(502, "豆包工作网络请求未完成，请检查连接后再试。");
+      }
+      if (stream && response.ok && response.headers.get("content-type")?.startsWith("text/event-stream")) {
+        const managed = scheduledResponse(response, slot.release, slot.signal);
+        handedOff = true;
+        return managed;
+      }
+      const value = await readJSON(response);
+      if (!response.ok || Number(value.code ?? value.error_code ?? value.status_code ?? 0) !== 0 || stream)
+        throw vendorError(response.status, value);
+      return value;
     } catch (error) {
-      if ([401, 429].includes(response.status))
-        throw vendorError(response.status);
+      reportFailure(s, error, retryAfterMilliseconds(response?.headers.get("retry-after"), now()));
       throw error;
-    }
-    if (!response.ok || Number(value.code ?? value.error_code ?? 0) !== 0)
-      throw vendorError(response.status, value);
-    if (stream) throw vendorError(response.status, value);
-    return value;
+    } finally { if (!handedOff) slot.release(); }
   }
   return {
     post: request,
+    reportFailure,
+    requestStatus: () => ({ ...scheduler.status(), rateLimitCooldownMs, usageTtlMs }),
     async identify(s, { signal } = {}) {
       const u = new URL(ORIGIN + "/passport/account/info/v2/");
       for (const [k, v] of Object.entries({
@@ -544,49 +625,29 @@ export function createApi({ fetchImpl = fetch } = {}) {
         "use-olympus-account": "1",
       }))
         u.searchParams.set(k, v);
+      const slot = await lease(s, signal);
       let response;
       try {
-        response = await fetchImpl(u.href, {
-          redirect: "error",
-          headers: headers(s),
-          signal: signal
-            ? AbortSignal.any([signal, AbortSignal.timeout(25000)])
-            : AbortSignal.timeout(25000),
-        });
-      } catch {
-        throw fail(
-          signal?.aborted ? 499 : 502,
-          "账号身份核验未完成，请检查连接。",
-        );
-      }
-      const value = await jsonLimited(response);
-      if (
-        !response.ok ||
-        (value.message && value.message !== "success") ||
-        Number(value.error_code ?? 0) !== 0
-      )
-        throw vendorError(
-          response.status === 200 ? 401 : response.status,
-          value,
-        );
-      const d = value.data || value,
-        userId = str(d.user_id_str);
-      if (!userId) throw fail(401, "豆包工作未确认账号身份，请重新登录。");
-      return {
-        ...s,
-        userId,
-        enterpriseType: str(d.passport_enterprise_user_type) || "0",
-        name: clean(d.name) || userId,
-        email: clean(d.email),
-        avatar: str(d.avatar_url),
-      };
+        try { response = await fetchImpl(u.href, { redirect: "error", headers: headers(s), signal: slot.signal }); }
+        catch { throw fail(signal?.aborted ? 499 : 502, "账号身份核验未完成，请检查连接。"); }
+        const value = await readJSON(response);
+        if (!response.ok || (value.message && value.message !== "success") || Number(value.error_code ?? value.code ?? value.status_code ?? 0) !== 0) {
+          const error = vendorError(response.status, value);
+          throw response.status === 200 && error.reason === "upstream_error" ? vendorError(401, value) : error;
+        }
+        const d = value.data || value, userId = str(d.user_id_str);
+        if (!userId) throw fail(401, "豆包工作未确认账号身份，请重新登录。");
+        return {
+          ...s, userId, enterpriseType: str(d.passport_enterprise_user_type) || "0",
+          name: clean(d.name) || userId, email: clean(d.email), avatar: str(d.avatar_url),
+        };
+      } catch (error) {
+        reportFailure(s, error, retryAfterMilliseconds(response?.headers.get("retry-after"), now()));
+        throw error;
+      } finally { slot.release(); }
     },
     async catalog(s, { signal, force = false } = {}) {
-      const key = credentialKey(s),
-        old = cache.get(key);
-      if (!force && old && Date.now() - old.at < 300000) return old;
-      if (pending.has(key)) return pending.get(key);
-      const task = (async () => {
+      return cachedCatalog(credentialKey(s), async signal => {
         const launch = await request(s, "/alice/user/launch", {}, { signal }),
           bot = str(launch.data?.assistant_bot_id || launch.assistant_bot_id);
         if (!bot) throw fail(502, "豆包工作未返回助手信息。");
@@ -599,37 +660,25 @@ export function createApi({ fetchImpl = fetch } = {}) {
           models = parseCatalog(raw);
         if (!Object.keys(models).length)
           throw fail(502, "豆包工作模型目录为空或已变化，请稍后刷新。");
-        const catalog = { bot, models, at: Date.now() };
-        if (cache.size >= 64) cache.delete(cache.keys().next().value);
-        cache.set(key, catalog);
-        return catalog;
-      })();
-      pending.set(key, task);
-      try {
-        return await task;
-      } finally {
-        pending.delete(key);
-      }
+        return { bot, models, at: now() };
+      }, { signal, force });
     },
-    async usage(s, { signal } = {}) {
-      const overview = await request(
-        s,
-        "/alice/commerce/sale/subscription/overview/",
-        { product_line: "membership" },
-        { signal },
-      );
-      let entry = {};
-      try {
-        entry = await request(
+    async usage(s, { signal, force = false } = {}) {
+      return cachedUsage(credentialKey(s), async signal => {
+        const overview = await request(
           s,
-          "/alice/commerce/sale/subscription/entry/config/",
-          {},
+          "/alice/commerce/sale/subscription/overview/",
+          { product_line: "membership" },
           { signal },
         );
-      } catch (e) {
-        if (e.signIn || e.reason === "verification_required") throw e;
-      }
-      return { ...quotaView(overview, entry), user: s.name || s.userId };
+        let entry = {};
+        try {
+          entry = await request(s, "/alice/commerce/sale/subscription/entry/config/", {}, { signal });
+        } catch (e) {
+          if (e.signIn || ["verification_required", "rate_limited"].includes(e.reason) || e.localRateLimit) throw e;
+        }
+        return { ...quotaView(overview, entry), user: s.name || s.userId };
+      }, { signal, force });
     },
   };
 }

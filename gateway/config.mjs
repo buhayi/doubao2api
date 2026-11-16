@@ -17,11 +17,11 @@ function integer(value, fallback, min, max, name) {
     throw Error(`${name} 必须是 ${min}–${max} 之间的整数。`);
   return Number(value);
 }
-export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
+export async function loadConfig({ cwd = process.cwd(), env = process.env, envFile = ".env", defaults = {} } = {}) {
   let local = {};
-  try { local = parseEnv(await readFile(resolve(cwd, ".env"), "utf8")); }
+  try { local = parseEnv(await readFile(resolve(cwd, envFile), "utf8")); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
-  const values = { ...local, ...env };
+  const values = { ...defaults, ...local, ...env };
   const host = values.DW_HOST || "127.0.0.1";
   if (!isIP(host) && !/^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$/.test(host))
     throw Error("DW_HOST 必须是 IP 地址或主机名，不包含协议或端口。");
@@ -33,7 +33,7 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
     if (!["http:", "https:"].includes(url.protocol) || url.origin !== origin)
       throw Error("DW_CORS_ORIGINS 只接受不含路径的 HTTP(S) 来源地址。");
   }
-  for (const name of ["DW_PROMPT_TOOLS", "DW_HIDE_HISTORY"])
+  for (const name of ["DW_PROMPT_TOOLS", "DW_DELETE_HISTORY", "DW_HIDE_HISTORY"])
     if (values[name] !== undefined && !["true", "false"].includes(values[name]))
       throw Error(`${name} 必须为 true 或 false。`);
   const dataDir = resolve(cwd, values.DW_DATA_DIR || "data");
@@ -43,6 +43,8 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
   const port = integer(values.DW_PORT, 8787, 1, 65535, "DW_PORT");
   const adminPort = integer(values.DW_ADMIN_PORT, 8786, 0, 65535, "DW_ADMIN_PORT");
   if (adminPort && adminPort === port) throw Error("DW_ADMIN_PORT 不能与 DW_PORT 使用同一个端口。");
+  // Keep old .env files working; explicit DW_DELETE_HISTORY takes precedence.
+  const deleteHistory = (values.DW_DELETE_HISTORY ?? values.DW_HIDE_HISTORY) !== "false";
   return {
     host,
     port,
@@ -50,14 +52,21 @@ export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}
     dataDir,
     apiKey: values.DW_API_KEY ? validateApiKey(values.DW_API_KEY) : undefined,
     accountId: values.DW_ACCOUNT_ID || undefined,
+    clientPaths: Object.fromEntries(["DW_DOUBAO_WORK_BIN", "DW_DOUBAO_WORK_PROFILE"]
+      .filter((name) => values[name] !== undefined).map((name) => [name, values[name]])),
     corsOrigins,
     promptTools: values.DW_PROMPT_TOOLS !== "false",
-    hideHistory: values.DW_HIDE_HISTORY !== "false",
-    // Retired settings cannot re-enable CAPTCHA windows or request recovery.
+    deleteHistory,
+    hideHistory: deleteHistory,
+    // Retired automatic solver/recovery settings stay disabled in both editions.
     autoCaptcha: false,
     captchaManualFallback: false,
     timeoutMs: integer(values.DW_TIMEOUT_MS, 120000, 1000, 600000, "DW_TIMEOUT_MS"),
     maxConcurrency: integer(values.DW_MAX_CONCURRENCY, 3, 1, 16, "DW_MAX_CONCURRENCY"),
+    upstreamMinIntervalMs: integer(values.DW_UPSTREAM_MIN_INTERVAL_MS, 1000, 0, 60000, "DW_UPSTREAM_MIN_INTERVAL_MS"),
+    upstreamQueueLimit: integer(values.DW_UPSTREAM_QUEUE_LIMIT, 16, 0, 128, "DW_UPSTREAM_QUEUE_LIMIT"),
+    rateLimitCooldownMs: integer(values.DW_RATE_LIMIT_COOLDOWN_MS, 60000, 1000, 900000, "DW_RATE_LIMIT_COOLDOWN_MS"),
+    usageCacheTtlMs: integer(values.DW_USAGE_CACHE_TTL_MS, 30000, 0, 300000, "DW_USAGE_CACHE_TTL_MS"),
   };
 }
 export function baseUrl(host, port) {

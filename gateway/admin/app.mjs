@@ -46,6 +46,13 @@ function banners() {
   if (state.syncError) result.push(node("div", { class: "info-banner error", role: "alert" }, icon("alert"), state.syncError, button("重试", { kind: "quiet", onClick: () => void refresh().catch((error) => toast(error.message, true)) })));
   if (state.login.active) result.push(node("div", { class: "info-banner" }, icon("browser"), "有一个账号正在登录，完成后会自动加入账号池。", button("查看登录", { kind: "quiet", onClick: openLogin })));
   if (state.gateway.fixedAccountId) result.push(node("div", { class: "info-banner warning" }, icon("alert"), node("span", {}, "网关已固定使用账号 ", node("span", { class: "mono" }, state.gateway.fixedAccountId), "，固定配置优先于默认账号。")));
+  const verification = state.gateway.clientVerification;
+  if (verification?.enabled) for (const [uid, notice] of Object.entries(verification.accounts || {})) {
+    const account = state.accounts.find((item) => item.uid === uid);
+    result.push(node("div", { class: `info-banner verification-banner ${notice.state === "error" ? "error" : "warning"}`, role: "alert" }, icon("alert"),
+      node("span", {}, account ? `${account.name} 需要人工验证。` : "客户端账号需要人工验证。", notice.message),
+      account && button("验证完成后探活", { kind: "quiet", disabled: state.probing.has(uid) || state.checking.has(uid), onClick: () => void probeAccount(account) })));
+  }
   return result;
 }
 async function refresh({ live = false, fresh = false } = {}) {
@@ -300,7 +307,8 @@ function renderLogin() {
   if (!loginDialog) return;
   loginDialog.querySelector(".modal-body")?.remove();
   if (loginMode === "form" && !state.login.active) {
-    const browser = node("select", { id: "login-browser" }, [["auto", "自动选择浏览器"], ["edge", "Microsoft Edge"], ["chrome", "Google Chrome"], ["doubao", "豆包内置浏览器"], ["chromium", "Chromium"]].map(([value, label]) => node("option", { value }, label)));
+    const browser = node("select", { id: "login-browser" }, [["auto", "自动选择浏览器"], ["edge", "Microsoft Edge"], ["chrome", "Google Chrome"], ["doubaowork", "豆包工作客户端"], ["doubao", "豆包内置浏览器"], ["chromium", "Chromium"]].map(([value, label]) => node("option", { value }, label)));
+    browser.value = state.settings?.defaultBrowser || state.gateway.defaultBrowser || "auto";
     const transport = node("select", { id: "login-transport" }, node("option", { value: "pipe" }, "管道连接（推荐）"), node("option", { value: "port" }, "本机回环端口（兼容模式）"));
     const form = node("form", { onSubmit: async (event) => {
       event.preventDefault();
@@ -425,11 +433,13 @@ function renderSettings() {
     finally { keyCopy.disabled = false; }
   } });
   const settings = [
+    ["运行版本", config.edition === "work-client" ? "Windows 豆包工作客户端版" : "通用网关版"],
     ["管理台端口", config.adminPort], ["支持协议", protocols.map((item) => item.name).join(" / ")], ["账号策略", config.fixedAccountId ? "固定指定账号" : "默认账号"],
     ["请求超时", `${config.timeoutMs / 1000} 秒`], ["单账号并发", `${config.maxConcurrency} 个对话`], ["实验性工具桥", config.promptTools ? "已启用" : "已关闭"],
-    ["上游历史", config.hideHistory ? "会话完成后自动隐藏" : "保留会话记录"],
-    ["人机验证", "返回验证错误"],
-    ...(config.hideHistory && config.historyCleanup ? [["已隐藏会话", config.historyCleanup.hidden], ["隐藏未完成", config.historyCleanup.failed]] : []),
+    ["发送方式", "隐秘发送"],
+    ["上游历史", config.deleteHistory ? "收到回复后自动删除" : "保留会话记录"],
+    ["人机验证", config.clientVerification?.enabled ? "弹出豆包工作，人工验证" : "返回验证错误"],
+    ...(config.deleteHistory && config.historyCleanup ? [["已删除会话", config.historyCleanup.deleted], ["删除未完成", config.historyCleanup.failed]] : []),
     ...(config.fixedAccountId ? [["固定账号 UID", config.fixedAccountId]] : []), ["数据目录", config.dataDir],
   ];
   content.replaceChildren(pageHeading("接入配置", "将网关地址与访问密钥填入你的客户端。", button("刷新配置", { symbol: "refresh", onClick: () => void loadSettings() })), ...banners(), node("div", { class: "settings-grid" },
@@ -439,7 +449,7 @@ function renderSettings() {
       node("div", { class: "field-group" }, node("label", { class: "field-label", for: "api-key" }, "API Key / 访问密钥"), node("div", { class: "input-actions" }, keyInput, reveal, keyCopy), node("p", { class: "field-hint" }, "API Key 用于客户端访问网关，账号登录凭据仅保存在本机。")),
       node("p", { class: "settings-footnote" }, "模型 ID 可在“模型目录”中查询。其他设备访问时，请使用网关机器可达的地址。"),
     )),
-    node("section", { class: "panel" }, node("div", { class: "panel-heading" }, node("div", {}, node("h2", {}, "运行配置"), node("p", {}, "来自当前启动配置。")), icon("settings", 20)), node("div", { class: "settings-body" }, node("dl", { class: "settings-list" }, settings.map(([label, value]) => node("div", {}, node("dt", {}, label), node("dd", {}, String(value))))), config.hideHistory && node("p", { class: "settings-footnote" }, "生成期间记录可能短暂出现。收到会话编号后，完成、取消或超时都会自动隐藏这次上游会话；清理失败会计入“隐藏未完成”。"), node("p", { class: "settings-footnote" }, "账号切换和启停对后续请求生效。端口、密钥等配置在 .env 中修改，重启服务后生效。"))),
+    node("section", { class: "panel" }, node("div", { class: "panel-heading" }, node("div", {}, node("h2", {}, "运行配置"), node("p", {}, "来自当前启动配置。")), icon("settings", 20)), node("div", { class: "settings-body" }, node("dl", { class: "settings-list" }, settings.map(([label, value]) => node("div", {}, node("dt", {}, label), node("dd", {}, String(value))))), config.deleteHistory && node("p", { class: "settings-footnote" }, "文本按不可见消息发送。收到会话编号后，回复完成、取消或超时都会删除本次上游会话；失败会计入“删除未完成”。"), config.clientVerification?.enabled && node("p", { class: "settings-footnote" }, "遇到验证要求时会恢复或启动已安装的豆包工作。请在对应账号中人工完成验证，再点击“探活”恢复账号，随后重试请求。并发提醒会合并，之后再次收到验证要求时会重新唤起窗口。"), node("p", { class: "settings-footnote" }, "账号切换和启停对后续请求生效。端口、密钥等配置在配置文件中修改，重启服务后生效。"))),
   ));
 }
 

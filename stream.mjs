@@ -114,7 +114,7 @@ class Decoder {
     return [];
   }
 }
-export async function* decodeEvents(response, { signal, idleMs = 60000, onConversation, onClose } = {}) {
+export async function* decodeEvents(response, { signal, idleMs = 60000, onConversation, onError, onClose } = {}) {
   const reader = response.body?.getReader();
   if (!reader) throw fail(502, "豆包工作没有返回流式响应。");
   const text = new TextDecoder("utf-8", { fatal: true }),
@@ -172,11 +172,14 @@ export async function* decodeEvents(response, { signal, idleMs = 60000, onConver
         throw fail(502, "豆包工作流式事件超过大小限制。");
     }
   } catch (e) {
-    if (e.status) throw e;
-    throw fail(
+    const error = e.status ? e : fail(
       signal?.aborted ? 499 : 502,
       signal?.aborted ? "请求已取消。" : "豆包工作流式连接已中断。",
     );
+    // Report in-band rejections while the response still owns its account
+    // lease. Cancellation below may otherwise start a queued upstream call.
+    await onError?.(error);
+    throw error;
   } finally {
     signal?.removeEventListener("abort", abort);
     await reader.cancel().catch(() => {});

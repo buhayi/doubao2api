@@ -129,6 +129,7 @@ test("原生插件开关即时生效：关闭工具桥，签到入口已移除",
   assert.deepEqual(
     hooks.auth.options.map((o) => [o.key, o.default]),
     [
+      ["delete_history", true],
       ["browser_loopback", false],
       ["prompt_tools", true],
     ],

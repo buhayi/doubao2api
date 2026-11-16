@@ -13,6 +13,7 @@ export function isAvailableAccount(account) {
   return account.enabled !== false && !isInvalidAccount(account);
 }
 export function isUpstreamFailure(error) {
+  if (error?.localRateLimit) return false;
   if (["AbortError", "TimeoutError"].includes(error?.name) || error?.status === 499) return false;
   if (error?.status === 504 && error?.reason !== "upstream_error" && !(Number.isSafeInteger(error?.upstreamCode) && error.upstreamCode > 0)) return false;
   return ["session_expired", "rate_limited", "verification_required", "upstream_error"].includes(error?.reason)
